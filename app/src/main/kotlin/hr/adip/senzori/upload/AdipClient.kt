@@ -48,10 +48,35 @@ class AdipClient(val deviceId: String) {
       val c = open(baseUrl, "/api/senzori/status", token, "GET")
       try {
         val j = c.readResult()
-        // Provjeri i token (status ne traži autentikaciju)
-        val auth = open(baseUrl, "/api/senzori/sesije", token, "GET")
-        val authOk = try { auth.responseCode == 200 } finally { auth.disconnect() }
-        "OK (${j.optString("service")} v${j.optInt("version")})" + if (authOk) ", token ispravan" else ", TOKEN NEISPRAVAN"
+        val base = "OK (${j.optString("service")} v${j.optInt("version")})"
+        if (token.isBlank()) return@runCatching "$base, token nije postavljen"
+        // Provjera tokena (GET /api/senzori/token)
+        val auth = open(baseUrl, "/api/senzori/token", token, "GET")
+        try {
+          when (auth.responseCode) {
+            200 -> {
+              val t = auth.readResult()
+              "$base, token ispravan (${t.optString("naziv").ifBlank { t.optString("id") }})"
+            }
+            401, 403 -> "$base, TOKEN NEISPRAVAN"
+            else -> "$base, token se ne može provjeriti (HTTP ${auth.responseCode})"
+          }
+        } finally { auth.disconnect() }
+      } finally { c.disconnect() }
+    }
+  }
+
+  /** Kreira novi token na serveru (POST /api/senzori/tokeni) uz lozinku društva. Vraća token. */
+  suspend fun createToken(baseUrl: String, lozinka: String, naziv: String): Result<String> = withContext(Dispatchers.IO) {
+    runCatching {
+      val body = JSONObject().put("lozinka", lozinka).put("naziv", naziv).toString().toByteArray()
+      val c = open(baseUrl, "/api/senzori/tokeni", "", "POST")
+      try {
+        c.doOutput = true
+        c.setRequestProperty("Content-Type", "application/json")
+        c.setFixedLengthStreamingMode(body.size)
+        c.outputStream.use { it.write(body) }
+        c.readResult().getString("token")
       } finally { c.disconnect() }
     }
   }

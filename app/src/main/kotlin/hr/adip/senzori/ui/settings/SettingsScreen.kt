@@ -19,10 +19,13 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Info
+import androidx.compose.material.icons.outlined.Key
 import androidx.compose.material.icons.outlined.NetworkCheck
 import androidx.compose.material.icons.outlined.Visibility
 import androidx.compose.material.icons.outlined.VisibilityOff
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ElevatedCard
 import androidx.compose.material3.FilledTonalButton
@@ -37,6 +40,8 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -119,7 +124,13 @@ fun SettingsScreen(
 
     Section("Web servis") {
       TextSetting("Adresa servera", settings.serverUrl, keyboardType = KeyboardType.Uri) { v -> update { it.copy(serverUrl = v.trim()) } }
-      TextSetting("Token", settings.serverToken, password = true) { v -> update { it.copy(serverToken = v.trim()) } }
+      var tokenGen by remember { mutableIntStateOf(0) }
+      key(tokenGen) {
+        TextSetting("Token", settings.serverToken, password = true) { v -> update { it.copy(serverToken = v.trim()) } }
+      }
+      CreateToken(client, settings) { t ->
+        scope.launch { repo.update { it.copy(serverToken = t) }; tokenGen++ }
+      }
       SwitchRow("Slanje uživo", "Šalji podatke na server tijekom snimanja", settings.liveUploadEnabled) { v ->
         update { it.copy(liveUploadEnabled = v) }
       }
@@ -260,6 +271,63 @@ private fun ConnectionTest(client: AdipClient, settings: AppSettings) {
     r.fold(
       onSuccess = { Text("✓ $it", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.tertiary) },
       onFailure = { Text("✗ ${it.message ?: it.javaClass.simpleName}", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.error) },
+    )
+  }
+}
+
+/** Dohvat novog tokena s web servisa uz lozinku društva (lozinka se ne sprema). */
+@Composable
+private fun CreateToken(client: AdipClient, settings: AppSettings, onToken: (String) -> Unit) {
+  val scope = rememberCoroutineScope()
+  var open by remember { mutableStateOf(false) }
+  var lozinka by remember { mutableStateOf("") }
+  var naziv by remember { mutableStateOf(client.deviceModel) }
+  var busy by remember { mutableStateOf(false) }
+  var error by remember { mutableStateOf<String?>(null) }
+  var done by remember { mutableStateOf(false) }
+
+  FilledTonalButton(onClick = { open = true; error = null; done = false; lozinka = "" }, enabled = settings.serverUrl.isNotBlank()) {
+    Icon(Icons.Outlined.Key, null)
+    Spacer(Modifier.width(8.dp))
+    Text(if (settings.serverToken.isBlank()) "Dohvati token" else "Dohvati novi token")
+  }
+  if (done) Hint("✓ Token je dohvaćen i spremljen.")
+  if (open) {
+    AlertDialog(
+      onDismissRequest = { if (!busy) open = false },
+      title = { Text("Novi token") },
+      text = {
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+          Hint("Token se kreira na ${settings.serverUrl} uz lozinku društva. Lozinka se ne sprema na uređaju.")
+          OutlinedTextField(
+            value = naziv, onValueChange = { naziv = it }, label = { Text("Naziv uređaja") },
+            singleLine = true, modifier = Modifier.fillMaxWidth(),
+          )
+          OutlinedTextField(
+            value = lozinka, onValueChange = { lozinka = it }, label = { Text("Lozinka") },
+            singleLine = true, modifier = Modifier.fillMaxWidth(),
+            visualTransformation = PasswordVisualTransformation(),
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password, autoCorrectEnabled = false),
+            isError = error != null,
+          )
+          error?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
+        }
+      },
+      confirmButton = {
+        TextButton(
+          enabled = !busy && lozinka.isNotEmpty(),
+          onClick = {
+            busy = true; error = null
+            scope.launch {
+              client.createToken(settings.serverUrl, lozinka, naziv.trim().ifBlank { client.deviceModel })
+                .onSuccess { onToken(it); open = false; done = true; lozinka = "" }
+                .onFailure { error = it.message }
+              busy = false
+            }
+          },
+        ) { if (busy) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp) else Text("Kreiraj") }
+      },
+      dismissButton = { TextButton(onClick = { open = false }, enabled = !busy) { Text("Odustani") } },
     )
   }
 }

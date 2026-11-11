@@ -8,6 +8,9 @@ import android.media.AudioFormat
 import android.media.AudioManager
 import android.media.AudioRecord
 import android.media.MediaRecorder
+import android.media.audiofx.AcousticEchoCanceler
+import android.media.audiofx.AutomaticGainControl
+import android.media.audiofx.NoiseSuppressor
 import android.util.Log
 import androidx.core.content.ContextCompat
 import kotlin.math.log10
@@ -22,8 +25,9 @@ import kotlin.math.sqrt
  * Pozadina: infrazvuk je < 20 Hz. Mikrofoni mobitela imaju fizički i/ili softverski
  * visokopropusni filtar (tipično s padom ispod ~10–20 Hz), pa su vrijednosti relativne,
  * osim ako se ne kalibriraju referentnim mikrobarometrom. Zato:
- *  - koristimo izvor UNPROCESSED (bez AGC/NS/HPF) kad ga uređaj podržava, inače VOICE_RECOGNITION
- *    (minimalna obrada), te nisku frekvenciju uzorkovanja (8 kHz, kao RedVox infrasound app);
+ *  - koristimo izvor UNPROCESSED (bez AGC/NS/HPF) kad ga uređaj podržava, inače MIC uz isključene
+ *    audio efekte (AGC, potiskivanje šuma, poništavanje jeke), te nisku frekvenciju uzorkovanja
+ *    (8 kHz, kao RedVox infrasound app);
  *  - signal decimiramo u dva stupnja na ~100 Hz s anti-aliasing filtrima,
  *  - zatim pojasno filtriramo 0.5 Hz – fc (fc = min(20 Hz, 0.4 × frekvencija zapisa)).
  */
@@ -68,7 +72,7 @@ class InfrasoundSource(
     val am = context.getSystemService(AudioManager::class.java)
     val unprocessed = am?.getProperty(AudioManager.PROPERTY_SUPPORT_AUDIO_SOURCE_UNPROCESSED) == "true"
     return if (unprocessed) MediaRecorder.AudioSource.UNPROCESSED to "UNPROCESSED"
-    else MediaRecorder.AudioSource.VOICE_RECOGNITION to "VOICE_RECOGNITION"
+    else MediaRecorder.AudioSource.MIC to "MIC"
   }
 
   @SuppressLint("MissingPermission")
@@ -80,11 +84,29 @@ class InfrasoundSource(
       val rec = try {
         AudioRecord(src, rate, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT, max(minBuf, rate / 5 * 2))
       } catch (e: Exception) { null } ?: continue
-      if (rec.state == AudioRecord.STATE_INITIALIZED) return Triple(rec, rate, srcName)
+      if (rec.state == AudioRecord.STATE_INITIALIZED) {
+        val off = disableEffects(rec.audioSessionId)
+        return Triple(rec, rate, if (off.isEmpty()) srcName else "$srcName, isklj. ${off.joinToString("/")}")
+      }
       rec.release()
     }
     return null
   }
+
+  /** Isključi obradu signala koju neki uređaji uključuju na izvoru MIC. Vraća popis isključenih efekata. */
+  private fun disableEffects(session: Int): List<String> {
+    val off = ArrayList<String>()
+    fun tryOff(name: String, available: Boolean, create: () -> android.media.audiofx.AudioEffect?) {
+      if (!available) return
+      runCatching { create()?.let { e -> if (e.enabled) { e.enabled = false; off.add(name) }; effects.add(e) } }
+    }
+    tryOff("AGC", AutomaticGainControl.isAvailable()) { AutomaticGainControl.create(session) }
+    tryOff("NS", NoiseSuppressor.isAvailable()) { NoiseSuppressor.create(session) }
+    tryOff("AEC", AcousticEchoCanceler.isAvailable()) { AcousticEchoCanceler.create(session) }
+    return off
+  }
+
+  private val effects = ArrayList<android.media.audiofx.AudioEffect>()
 
   private fun loop() {
     val opened = try { openRecord() } catch (e: SecurityException) { null }
@@ -144,6 +166,8 @@ class InfrasoundSource(
     } finally {
       runCatching { rec.stop() }
       rec.release()
+      effects.forEach { runCatching { it.release() } }
+      effects.clear()
     }
   }
 
