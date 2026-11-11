@@ -89,10 +89,14 @@ module.exports = function registrirajSenzoriApi(app, opcije) {
     return x.length === y.length && crypto.timingSafeEqual(x, y);
   }
 
-  /* Klijentska IP adresa; iza Apache proxyja prvi unos X-Forwarded-For. */
+  /* Klijentska IP adresa. Iza Apache proxyja ZADNJI unos X-Forwarded-For dodaje sam
+     proxy (stvarna IP klijenta); prve unose klijent može lažirati pa ih ne koristimo. */
   function ipAdresa(req) {
     const xff = req.headers['x-forwarded-for'];
-    if (typeof xff === 'string' && xff.trim()) return xff.split(',')[0].trim();
+    if (typeof xff === 'string' && xff.trim()) {
+      const dijelovi = xff.split(',').map(s => s.trim()).filter(Boolean);
+      if (dijelovi.length) return dijelovi[dijelovi.length - 1];
+    }
     return (req.socket && req.socket.remoteAddress) || '?';
   }
 
