@@ -10,11 +10,13 @@ data class Sample(
   /** Infrazvuk: pojasno filtriran signal mikrofona (rel. jedinice ili Pa ako je kalibrirano). */
   val infra: Float?,
   val pHpa: Float?,
+  /** Razina čujnog zvuka (RMS u intervalu uzorka), dBFS. */
+  val audioDb: Float? = null,
 ) {
-  fun toCsvRow(): List<Number?> = listOf(tMs, ax, ay, az, lux, infra, pHpa)
+  fun toCsvRow(): List<Number?> = listOf(tMs, ax, ay, az, lux, infra, pHpa, audioDb)
 
   companion object {
-    val COLUMNS = listOf("t_ms", "ax", "ay", "az", "lux", "infra", "p_hpa")
+    val COLUMNS = listOf("t_ms", "ax", "ay", "az", "lux", "infra", "p_hpa", "audio_db")
   }
 }
 

@@ -74,6 +74,7 @@ private val KNOWN = listOf(
   Group("Svjetlo", Icons.Outlined.LightMode, "lx", listOf(Channel("lux", "lux", ChartColors.Lux)), 2f),
   Group("Infrazvuk", Icons.Outlined.GraphicEq, "", listOf(Channel("infra", "infra", ChartColors.Infra)), 1e-5f),
   Group("Tlak", Icons.Outlined.Compress, "hPa", listOf(Channel("p_hpa", "p", ChartColors.Pressure)), 0.05f),
+  Group("Zvuk", Icons.Outlined.Mic, "dBFS", listOf(Channel("audio_db", "dB", Color(0xFF26A69A))), 3f),
 )
 
 private class Stats(val min: Float, val max: Float, val mean: Float, val valid: Int)
@@ -155,7 +156,7 @@ private fun DetailContent(d: RecordingData, window: androidx.compose.runtime.Mut
         )
         for (c in g.channels) {
           val st = remember(d, c.key) { stats(d.values[c.key] ?: FloatArray(0)) }
-          val dec = if (c.key == "infra") 5 else if (c.key == "p_hpa") 2 else 3
+          val dec = if (c.key == "infra") 5 else if (c.key == "p_hpa") 2 else if (c.key == "audio_db") 1 else 3
           Row(verticalAlignment = Alignment.CenterVertically) {
             LegendDot(c.color, c.label, Modifier.width(56.dp))
             Text(

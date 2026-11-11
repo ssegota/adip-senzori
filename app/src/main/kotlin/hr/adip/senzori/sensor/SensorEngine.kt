@@ -204,7 +204,8 @@ class SensorEngine(
         accSum.fill(0.0); accN = 0
       }
       val inf = infra?.takeIf { it.info.available }?.latest
-      val s = Sample(t0Wall + n * periodNs / 1_000_000, ax, ay, az, lux, inf, pHpa)
+      val adb = infra?.takeTickLevelDb()
+      val s = Sample(t0Wall + n * periodNs / 1_000_000, ax, ay, az, lux, inf, pHpa, adb)
       hist.add(s)
       longHist.add(s)
       if (active) {
@@ -273,7 +274,7 @@ class SensorEngine(
       "startedAt" to isoUtc(now),
       "startedAtMs" to now.toString(),
       "sampleRateHz" to runningRate.toString(),
-      "units" to "t_ms=unix ms; a=m/s^2; lux=lx; infra=" + (if (s.infraCalibrated) "Pa" else "rel. FS") + "; p_hpa=hPa",
+      "units" to "t_ms=unix ms; a=m/s^2; lux=lx; infra=" + (if (s.infraCalibrated) "Pa" else "rel. FS") + "; p_hpa=hPa; audio_db=dBFS",
       "infraSource" to (infra?.info?.status ?: "-"),
       "infraBand" to "0.5-${"%.1f".format(minOf(20.0, 0.4 * runningRate))} Hz",
       "sensors" to listOfNotNull(

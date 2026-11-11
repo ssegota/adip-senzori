@@ -50,6 +50,25 @@ class InfrasoundSource(
   private var wav: hr.adip.senzori.recording.WavWriter? = null
   @Volatile var sampleRate: Int = 0; private set
 
+  // Akumulator razine zvuka za jedan interval uzorka (čita ga ticker)
+  private val tickLock = Any()
+  private var tickSumSq = 0.0
+  private var tickN = 0
+  @Volatile private var lastTickDb: Float? = null
+
+  /** RMS razina zvuka (dBFS) od zadnjeg poziva; null ako mikrofon ne radi. */
+  fun takeTickLevelDb(): Float? {
+    if (!running || sampleRate == 0) return null
+    synchronized(tickLock) {
+      if (tickN == 0) return lastTickDb
+      val rms = kotlin.math.sqrt(tickSumSq / tickN) / 32768.0
+      tickSumSq = 0.0; tickN = 0
+      val db = if (rms > 0) (20 * log10(rms)).toFloat().coerceAtLeast(-120f) else -120f
+      lastTickDb = db
+      return db
+    }
+  }
+
   private var thread: Thread? = null
   @Volatile private var running = false
 
@@ -149,7 +168,7 @@ class InfrasoundSource(
     var peakAbs = 0
     var levelN = 0
 
-    val buf = ShortArray(fs / 20)
+    val buf = ShortArray(max(64, fs / 200)) // 5 ms blokovi, da razina zvuka prati interval uzorka
     var warmup = (outRate * 3).toInt() // pusti filtre da se smire
     var lastInfo = 0L
     try {
@@ -169,13 +188,16 @@ class InfrasoundSource(
         }
         val w = wav
         if (w != null) runCatching { w.write(buf, n) }
+        var bufSq = 0.0
         for (i in 0 until n) {
           val v = buf[i].toInt()
-          sumSq += v.toDouble() * v
+          bufSq += v.toDouble() * v
           val a = if (v < 0) -v else v
           if (a > peakAbs) peakAbs = a
         }
+        sumSq += bufSq
         levelN += n
+        synchronized(tickLock) { tickSumSq += bufSq; tickN += n }
         if (!infraEnabled) {
           val now = System.currentTimeMillis()
           if (now - lastInfo > 250) {

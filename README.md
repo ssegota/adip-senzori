@@ -154,6 +154,7 @@ Isti uzorak ide na tri mjesta: u kružni spremnik zadnjih 10 s (grafovi uživo),
 | `lux` | lx | `TYPE_LIGHT` |
 | `infra` | relativne jedinice punog raspona (FS) ili Pa ako je kalibrirano | mikrofon |
 | `p_hpa` | hPa | `TYPE_PRESSURE` |
+| `audio_db` | dBFS | razina čujnog zvuka iz mikrofona: RMS u intervalu svakog uzorka |
 
 Osi su osi uređaja: **x** prema desnom rubu ekrana, **y** prema vrhu ekrana, **z** iz ekrana prema korisniku. Mobitel koji leži na stolu ekranom prema gore pokazuje `az ≈ +9.81`.
 
@@ -245,7 +246,8 @@ Kad je u postavkama uključeno **Snimanje zvuka (WAV)**, u načinima Snimanje i 
 - **Format:** PCM 16 bit, mono, 16 / 44,1 / 48 kHz po izboru.
 - **Bez obrade:** zvuk dolazi iz istog `AudioRecord`-a kao infrazvuk, dakle izvor `UNPROCESSED` ili `MIC` s isključenim AGC/NS/AEC. Mikrofon se otvara samo jednom, a infrazvuk se računa iz istog signala.
 - **CSV:** u zaglavlje se upisuju `# audioFile=…` i `# sensors=…` (popis uključenih senzora).
-- **Bez slanja:** zvuk se ne šalje na server, jer bi bio prevelik za stream. WAV se dijeli iz aplikacije.
+- **Bez slanja:** WAV ostaje na mobitelu i dijeli se iz aplikacije. Na server, i u streamu, ide samo **razina zvuka** (stupac `audio_db`), koju web stranica crta kao graf "Zvuk (dBFS)".
+- **Razina zvuka** (`audio_db`) bilježi se uvijek kad mikrofon radi, dakle i kad je uključen samo infrazvuk. Mikrofon se čita u blokovima od 5 ms, pa razina prati interval svakog uzorka.
 
 ### Format
 
@@ -257,12 +259,12 @@ Kad je u postavkama uključeno **Snimanje zvuka (WAV)**, u načinima Snimanje i 
 # startedAt=2026-11-11T20:05:01.123Z
 # startedAtMs=1794427501123
 # sampleRateHz=50
-# units=t_ms=unix ms; a=m/s^2; lux=lx; infra=rel. FS; p_hpa=hPa
+# units=t_ms=unix ms; a=m/s^2; lux=lx; infra=rel. FS; p_hpa=hPa; audio_db=dBFS
 # infraSource=UNPROCESSED @ 8000 Hz → 100 Hz, pojas 0.5–20.0 Hz
 # infraBand=0.5-20.0 Hz
-t_ms,ax,ay,az,lux,infra,p_hpa
-1794427501143,0.0123,0.0871,9.8012,312.0,1.52E-4,1013.21
-1794427501163,0.0119,0.0866,9.8034,312.0,-3.1E-5,1013.21
+t_ms,ax,ay,az,lux,infra,p_hpa,audio_db
+1794427501143,0.0123,0.0871,9.8012,312.0,1.52E-4,1013.21,-62.4
+1794427501163,0.0119,0.0866,9.8034,312.0,-3.1E-5,1013.21,-61.9
 …
 ```
 
@@ -322,8 +324,8 @@ Primjer paketa koji aplikacija šalje:
   "sessionId": "adip_20261111_210501_3f2a9c1b",
   "deviceId": "3f2a9c…", "deviceModel": "Google Pixel 7", "appVersion": "1.0",
   "startedAt": "2026-11-11T20:05:01.123Z", "sampleRateHz": 50,
-  "columns": ["t_ms","ax","ay","az","lux","infra","p_hpa"],
-  "rows": [[1794427501143, 0.0123, 0.0871, 9.8012, 312.0, 0.000152, 1013.21], …]
+  "columns": ["t_ms","ax","ay","az","lux","infra","p_hpa","audio_db"],
+  "rows": [[1794427501143, 0.0123, 0.0871, 9.8012, 312.0, 0.000152, 1013.21, -62.4], …]
 }
 ```
 
