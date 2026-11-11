@@ -17,6 +17,14 @@ Repozitorij sadrži aplikaciju (`app/`) i serverski modul (`server/`), koji je u
 
 ---
 
+## Preuzimanje
+
+**[⬇ Preuzmi APK (najnovija verzija)](https://github.com/ssegota/adip-senzori/releases/latest/download/adip-senzori.apk)** · [sva izdanja](https://github.com/ssegota/adip-senzori/releases)
+
+Instalacija na mobitel: otvori preuzeti APK i dopusti instalaciju iz nepoznatih izvora (*Postavke → Sigurnost → Instaliraj nepoznate aplikacije*). Potreban je Android 8.0 ili noviji.
+
+---
+
 ## Sadržaj
 
 1. [Brzi početak](#brzi-početak)
