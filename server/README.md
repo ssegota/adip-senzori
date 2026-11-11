@@ -17,16 +17,21 @@ Ugrađuje se u stranicu `adip-web` (https://adip.hr) jednim redom.
    ```
 3. Deploy kao i obično. Nema novih ovisnosti (samo `express` i `multer`, već su tu).
 
-Opcije (drugi argument): `{ token, dataDir, batchLimit, uploadLimit }`.
+Opcije (drugi argument): `{ lozinkaHash, dataDir, batchLimit, uploadLimit }`.
 
 ### Podaci
 
 - `data/senzori/<sessionId>.csv` — jedna datoteka po sesiji
 - `data/senzori/index.json` — metapodaci (zapisuje se atomarno: tmp + rename)
+- `data/senzori/tokeni.json` — tokeni aplikacije (samo sha256 hash tokena, nikad sam token)
 - `data/senzori/.tmp/` — privremene datoteke uploada
 
 `deploy/sftp-deploy.sh` isključuje `data/`, pa mjerenja **preživljavaju svaki deploy**.
 Mapa se stvara sama; Passenger korisnik mora imati pravo pisanja u `data/`.
+
+`server.js` poslužuje cijeli direktorij kao statiku, pa modul na početak Express
+lanca stavlja blokadu za `/data/senzori/*` (404) — `index.json` (s `deviceId`) i
+`tokeni.json` nisu javno dostupni.
 
 ### Napomena o JSON parseru
 
@@ -37,16 +42,43 @@ Ostale rute stranice nisu pogođene.
 
 ## Autentikacija
 
-Sve osim `GET /api/senzori/status` traži zaglavlje:
-```
-Authorization: Bearer fake-jwt-token-adip
-```
-Bez ispravnog tokena: `401 {"ok":false,"error":"..."}`.
+| Što | Kako |
+|---|---|
+| čitanje (`/status`, `/sesije`, `/sesije/:id`, `/sesije/:id/csv`) | **javno**, bez prijave; odgovori ne sadrže `deviceId` |
+| slanje mjerenja (`/batch`, `/upload`), provjera tokena (`/token`) | `Authorization: Bearer <token>` |
+| upravljanje tokenima (`/tokeni`) | lozinka (`lozinka` u tijelu ili `X-Senzori-Lozinka`) |
+| brisanje sesije | token **ili** `X-Senzori-Lozinka` |
 
-> **TODO:** token je trenutno isti fiksni niz koji vraća `/api/login`. Kasnije ga
-> treba zamijeniti pravom prijavom (npr. potpisani JWT s rokom trajanja ili
-> zaseban API ključ po uređaju). Do tada se može proslijediti drugi:
-> `require('./senzori/server/senzori-api')(app, { token: 'novi' })`.
+Stari fiksni `fake-jwt-token-adip` više **ne vrijedi**. Bez ispravnog tokena/lozinke:
+`401 {"ok":false,"error":"..."}`.
+
+### Lozinka
+
+Lozinka za izradu tokena **nije u repozitoriju** (repozitorij je javan) — u
+`senzori-api.js` je samo njezin scrypt hash (`LOZINKA_HASH`, oblik
+`scrypt$<sol hex>$<hash hex>`), a provjera ide s `crypto.timingSafeEqual`.
+Najviše 10 pogrešnih pokušaja po IP adresi u 15 minuta, zatim `429`
+(iza Apache proxyja IP je prvi unos `X-Forwarded-For`).
+
+**Promjena lozinke** — izračunaj novi hash:
+```
+node -e "const c=require('crypto'),s=c.randomBytes(16);console.log('scrypt\$'+s.toString('hex')+'\$'+c.scryptSync(process.argv[1],s,32).toString('hex'))" 'NOVA-LOZINKA'
+```
+i zatim **ili** zamijeni `LOZINKA_HASH` u `senzori-api.js` (commit + deploy),
+**ili** postavi varijablu okoline `SENZORI_LOZINKA_HASH` (cPanel → Setup Node.js
+App → Environment variables) pa restartaj aplikaciju. Redoslijed prednosti:
+opcija `lozinkaHash` → `SENZORI_LOZINKA_HASH` → `LOZINKA_HASH`. Postojeći tokeni
+ostaju valjani.
+
+### Tokeni
+
+Token je 32 nasumična bajta (64 hex znaka) i prikazuje se **samo jednom**, pri
+izradi. U `tokeni.json` se sprema `{id, naziv, hash: sha256(token), created, lastUsed}`;
+`lastUsed` se osvježava najviše jednom u minuti. Id tokena koji je poslao
+mjerenja bilježi se u metapodacima sesije (`tokenId`, nije javan).
+Tokene se izrađuje i opoziva na stranici https://adip.hr/senzori/ (odjeljak
+»Tokeni za aplikaciju«) ili izravno preko API-ja (dolje). U aplikaciji:
+Postavke → Web servis → URL `https://adip.hr`, Token.
 
 ## CSV format (zajednički s aplikacijom)
 
@@ -65,12 +97,37 @@ t_ms,ax,ay,az,lux,infra,p_hpa
 
 ## API
 
-U primjerima: `H='Authorization: Bearer fake-jwt-token-adip'`, `U=https://adip.hr/api/senzori`.
+U primjerima: `H='Authorization: Bearer <token>'`, `L='X-Senzori-Lozinka: <lozinka>'`, `U=https://adip.hr/api/senzori`.
 
-### GET /status (bez tokena)
+### GET /status (javno)
 ```
 curl $U/status
-→ {"ok":true,"service":"adip-senzori","version":1,"time":"2026-11-11T10:00:00.000Z"}
+→ {"ok":true,"service":"adip-senzori","version":2,"time":"2026-11-11T10:00:00.000Z"}
+```
+
+### POST /tokeni — novi token (lozinka)
+```
+curl -X POST -H 'Content-Type: application/json' $U/tokeni -d '{"lozinka":"...","naziv":"Pixel 8 — terenski"}'
+→ {"ok":true,"token":"<64 hex>","id":"1a2b3c4d","naziv":"Pixel 8 — terenski","created":"2026-11-11T10:00:00.000Z"}
+```
+Pogrešna lozinka → `401 {"ok":false,"error":"Pogrešna lozinka"}`; previše pokušaja → `429`.
+
+### GET /tokeni — popis tokena (lozinka u zaglavlju)
+```
+curl -H "$L" $U/tokeni
+→ {"ok":true,"tokeni":[{"id":"1a2b3c4d","naziv":"...","created":"...","lastUsed":"..."|null}]}
+```
+
+### DELETE /tokeni/:id — opoziv (lozinka u zaglavlju)
+```
+curl -X DELETE -H "$L" $U/tokeni/1a2b3c4d
+→ {"ok":true}        (nepostojeći → 404)
+```
+
+### GET /token — provjera tokena (za aplikaciju)
+```
+curl -H "$H" $U/token
+→ {"ok":true,"id":"1a2b3c4d","naziv":"...","created":"..."}     (nevaljan → 401)
 ```
 
 ### POST /batch — dio mjerenja uživo (JSON, do ~2 MB)
@@ -97,39 +154,41 @@ curl -X POST -H "$H" -F file=@sesija.csv -F sessionId=2026-11-11_pixel_01 \
 Zamjenjuje postojeću sesiju istog id-a. `sampleRateHz`/`deviceModel`/`startedAt`
 mogu doći i iz `#` komentara u CSV-u (polja forme imaju prednost). Prevelika datoteka → 413.
 
-### GET /sesije — popis, najnovije prve
+### GET /sesije — popis, najnovije prve (javno)
 ```
-curl -H "$H" $U/sesije
-→ [{"sessionId":"...","deviceId":"abc123","deviceModel":"Pixel 8","appVersion":"1.0",
+curl $U/sesije
+→ [{"sessionId":"...","deviceModel":"Pixel 8","appVersion":"1.0",
     "startedAt":"2026-11-11T10:00:00Z","sampleRateHz":50,"columns":[...],
     "rows":15000,"updatedAt":"...","bytes":812345}]
 ```
 
-### GET /sesije/:id?limit=N — metapodaci + zadnjih N redaka (zadano 1000)
+### GET /sesije/:id?limit=N — metapodaci + zadnjih N redaka (zadano 1000, javno)
 ```
-curl -H "$H" "$U/sesije/2026-11-11_pixel_01?limit=3"
+curl "$U/sesije/2026-11-11_pixel_01?limit=3"
 → {"ok":true,"sessionId":"...", ...metapodaci..., "columns":[...],
    "totalRows":15000, "rows":[[t,ax,ay,az,lux,infra,p],...]}
 ```
 Ovdje je `rows` niz redaka (prazna ćelija → `null`), a ukupan broj je u `totalRows`.
 Nepostojeća sesija → 404.
 
-### GET /sesije/:id/csv — preuzimanje
+### GET /sesije/:id/csv — preuzimanje (javno)
 ```
-curl -H "$H" -o sesija.csv $U/sesije/2026-11-11_pixel_01/csv
+curl -o sesija.csv $U/sesije/2026-11-11_pixel_01/csv
 ```
+CSV se šalje kako je spremljen, osim reda `# deviceId=…` koji se izbacuje.
 
-### DELETE /sesije/:id
+### DELETE /sesije/:id — token ili lozinka
 ```
-curl -X DELETE -H "$H" $U/sesije/2026-11-11_pixel_01
+curl -X DELETE -H "$H" $U/sesije/2026-11-11_pixel_01      # ili -H "$L"
 → {"ok":true}
 ```
 
 ## Test
 
 ```
-node server/test-senzori.js
+node senzori/server/test-senzori.js
 ```
 Pokreće Express na slučajnom portu (express/multer/body-parser iz
-`~/Documents/ADIP/adip-web/node_modules`, ili `ADIP_WEB=/put`), s privremenom
-mapom podataka, i prolazi sve rute.
+`node_modules` ove stranice, ili `ADIP_WEB=/put`), s privremenom
+mapom podataka i vlastitom testnom lozinkom (`lozinkaHash`), i prolazi sve rute
+(tokeni, ograničenje pokušaja, javna čitanja bez `deviceId`, blokada statike).
