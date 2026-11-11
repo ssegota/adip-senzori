@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Senzorski val preko kruga (safe zone: krug r=33 oko 54,54) -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- prsten -->
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#FFFFB870"
+        android:strokeWidth="3"
+        android:pathData="M54,30a24,24 0,1 1,0 48a24,24 0,1 1,0 -48z" />
+    <!-- val (prigušena sinusoida) -->
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#FFFFFFFF"
+        android:strokeWidth="3.6"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:pathData="M27,54 L33,54 C35,54 36,44 38.5,44 C41,44 42,64 45,64 C48,64 48.5,36 51.5,36 C54.5,36 55,72 58,72 C61,72 61.5,46 64.5,46 C67,46 67.5,60 70,60 C72,60 72.5,54 74.5,54 L81,54" />
+    <!-- točka (senzor) -->
+    <path
+        android:fillColor="#FFFFB870"
+        android:pathData="M81,54m-2.8,0a2.8,2.8 0,1 1,5.6 0a2.8,2.8 0,1 1,-5.6 0" />
+</vector>
