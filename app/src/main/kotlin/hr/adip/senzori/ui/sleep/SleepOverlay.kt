@@ -72,6 +72,7 @@ fun SleepOverlay(engine: SensorEngine, onExit: () -> Unit) {
 
   val recording by engine.state.select { it.recording }
   val startedMs by engine.state.select { it.recordingStartedMs }
+  val mode by engine.state.select { it.sessionMode }
   val now by produceState(System.currentTimeMillis()) {
     while (true) { value = System.currentTimeMillis(); delay(1000L - value % 1000L) }
   }
@@ -95,7 +96,11 @@ fun SleepOverlay(engine: SensorEngine, onExit: () -> Unit) {
       if (recording) {
         val elapsed = ((nowLike(startedMs) - startedMs) / 1000).coerceAtLeast(0)
         Text(
-          "● REC ${formatDuration(elapsed)}",
+          when (mode) {
+            hr.adip.senzori.data.SessionMode.STREAM -> "● STREAM ${formatDuration(elapsed)}"
+            hr.adip.senzori.data.SessionMode.BOTH -> "● STREAM + REC ${formatDuration(elapsed)}"
+            else -> "● REC ${formatDuration(elapsed)}"
+          },
           style = TextStyle(color = SleepRed, fontSize = 14.sp, fontFeatureSettings = "tnum"),
         )
       }

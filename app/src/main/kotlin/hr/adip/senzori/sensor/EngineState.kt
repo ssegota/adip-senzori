@@ -68,7 +68,10 @@ data class EngineState(
   val hasLight: Boolean = false,
   val hasPressure: Boolean = false,
   val infra: InfraInfo = InfraInfo(),
+  /** Sesija (stream i/ili snimanje) je aktivna. */
   val recording: Boolean = false,
+  val sessionMode: hr.adip.senzori.data.SessionMode? = null,
+  /** Ime CSV datoteke koja se piše (null ako se samo streama). */
   val recordingName: String? = null,
   val recordedRows: Long = 0,
   val recordingStartedMs: Long = 0,

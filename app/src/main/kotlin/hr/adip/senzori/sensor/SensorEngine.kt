@@ -12,6 +12,7 @@ import android.os.SystemClock
 import androidx.core.content.ContextCompat
 import hr.adip.senzori.BuildConfig
 import hr.adip.senzori.data.AppSettings
+import hr.adip.senzori.data.SessionMode
 import hr.adip.senzori.data.SettingsRepository
 import hr.adip.senzori.recording.CsvRecorder
 import hr.adip.senzori.recording.RecordingRepository
@@ -77,7 +78,10 @@ class SensorEngine(
   private var hist = Ring(10 * 50)
   @Volatile private var longHist = Ring(LONG_HISTORY_S * 50)
 
-  // Snimanje
+  // Sesija: stream i/ili snimanje
+  @Volatile private var active = false
+  @Volatile private var mode = SessionMode.RECORD
+  @Volatile private var sessionRows = 0L
   @Volatile private var recorder: CsvRecorder? = null
   private var recordingStartMs = 0L
   private var sessionId = ""
@@ -91,7 +95,7 @@ class SensorEngine(
         settings = s
         val needsRestart = old.sampleRateHz != s.sampleRateHz || old.infraEnabled != s.infraEnabled ||
           old.infraCalibrationPaPerFs != s.infraCalibrationPaPerFs
-        if (needsRestart && _state.value.running && recorder == null) restart()
+        if (needsRestart && _state.value.running && !active) restart()
       }
     }
   }
@@ -138,7 +142,7 @@ class SensorEngine(
 
   @Synchronized
   fun stop() {
-    if (recorder != null) return // snimanje ima prednost
+    if (active) return // aktivna sesija ima prednost
     stopInternal()
   }
 
@@ -188,9 +192,10 @@ class SensorEngine(
       val s = Sample(t0Wall + n * periodNs / 1_000_000, ax, ay, az, lux, inf, pHpa)
       hist.add(s)
       longHist.add(s)
-      recorder?.let { r ->
-        r.write(s)
-        if (settings.liveUploadEnabled) synchronized(uploadQueue) {
+      if (active) {
+        recorder?.write(s)
+        sessionRows++
+        if (mode.streams) synchronized(uploadQueue) {
           uploadQueue.add(s)
           if (uploadQueue.size > MAX_QUEUE) uploadQueue.subList(0, uploadQueue.size - MAX_QUEUE).clear()
         }
@@ -203,12 +208,12 @@ class SensorEngine(
       delay(66)
       val g: FloatArray
       synchronized(lock) { g = gravity.copyOf() }
-      val r = recorder
+      val isActive = active
       _state.update {
         it.copy(
           latest = hist.last(), history = hist.snapshot(), gravity = g,
           infra = infra?.info ?: it.infra,
-          recordedRows = r?.rows ?: it.recordedRows,
+          recordedRows = if (isActive) sessionRows else it.recordedRows,
           upload = uploadInfo.copy(pendingRows = synchronized(uploadQueue) { uploadQueue.size }),
         )
       }
@@ -221,9 +226,12 @@ class SensorEngine(
 
   // ---------------- snimanje ----------------
 
-  /** Pokreće foreground servis koji zatim poziva [beginRecording]. */
-  fun startRecording(context: Context) {
-    ContextCompat.startForegroundService(context, Intent(context, MeasurementService::class.java))
+  /** Pokreće foreground servis koji zatim poziva [beginRecording] s odabranim načinom. */
+  fun startRecording(context: Context, mode: SessionMode = settings.sessionMode) {
+    ContextCompat.startForegroundService(
+      context,
+      Intent(context, MeasurementService::class.java).putExtra(MeasurementService.EXTRA_MODE, mode.name),
+    )
   }
 
   fun stopRecording(context: Context) {
@@ -232,12 +240,12 @@ class SensorEngine(
   }
 
   @Synchronized
-  internal fun beginRecording() {
-    if (recorder != null) return
+  internal fun beginRecording(sessionMode: SessionMode) {
+    if (active) return
     if (_state.value.running && runningRate != settings.sampleRateHz) stopInternal()
     start()
     val now = System.currentTimeMillis()
-    val file = recordings.newFile(now)
+    val file = recordings.newFile(now) // za snimanje; kod streama samo daje ime sesije
     recordingStartMs = now
     sessionId = client.sessionIdFor(file.nameWithoutExtension)
     val s = settings
@@ -254,46 +262,62 @@ class SensorEngine(
       "infraBand" to "0.5-${"%.1f".format(minOf(20.0, 0.4 * runningRate))} Hz",
     )
     synchronized(uploadQueue) { uploadQueue.clear() }
-    uploadInfo = UploadInfo(enabled = s.liveUploadEnabled)
-    recorder = CsvRecorder(file, meta)
+    uploadInfo = UploadInfo(enabled = sessionMode.streams)
+    mode = sessionMode
+    sessionRows = 0
+    recorder = if (sessionMode.records) CsvRecorder(file, meta) else null
+    active = true
     _state.update {
-      it.copy(recording = true, recordingName = file.nameWithoutExtension, recordedRows = 0, recordingStartedMs = now, upload = uploadInfo)
+      it.copy(
+        recording = true, sessionMode = sessionMode,
+        recordingName = if (sessionMode.records) file.nameWithoutExtension else null,
+        recordedRows = 0, recordingStartedMs = now, upload = uploadInfo,
+      )
     }
-    uploadJob = scope.launch { uploadLoop(isoUtc(now)) }
+    if (sessionMode.streams) uploadJob = scope.launch { uploadLoop(isoUtc(now)) }
   }
 
   @Synchronized
   internal fun endRecording() {
-    val r = recorder ?: return
+    if (!active) return
+    active = false
+    recorder?.close()
     recorder = null
-    r.close()
     val job = uploadJob
     uploadJob = null
-    // Pošalji ostatak reda prije gašenja
+    val streamed = mode.streams
+    // Pošalji ostatak reda (u više paketa ako treba) prije gašenja
     scope.launch {
       job?.cancel()
-      if (settings.liveUploadEnabled) flushUpload(isoUtc(recordingStartMs))
+      if (streamed) {
+        var tries = 0
+        while (synchronized(uploadQueue) { uploadQueue.isNotEmpty() } && tries++ < 50) {
+          if (!flushUpload(isoUtc(recordingStartMs))) break
+        }
+      }
     }
-    _state.update { it.copy(recording = false, recordedRows = r.rows) }
+    _state.update { it.copy(recording = false, sessionMode = null, recordedRows = sessionRows) }
   }
 
   private suspend fun uploadLoop(startedIso: String) {
     while (true) {
       delay(settings.uploadBatchSeconds.coerceIn(1, 60) * 1000L)
-      if (settings.liveUploadEnabled) flushUpload(startedIso)
+      flushUpload(startedIso)
     }
   }
 
-  private suspend fun flushUpload(startedIso: String) {
+  /** Pošalji jedan paket iz reda. Vraća true ako je uspjelo (ili nije bilo što slati). */
+  private suspend fun flushUpload(startedIso: String): Boolean {
     val batch = synchronized(uploadQueue) { ArrayList(uploadQueue.take(BATCH_MAX)) }
-    if (batch.isEmpty()) return
+    if (batch.isEmpty()) return true
     val s = settings
-    client.sendBatch(s.serverUrl, s.serverToken, sessionId, startedIso, runningRate, batch)
+    return client.sendBatch(s.serverUrl, s.serverToken, sessionId, startedIso, runningRate, batch)
       .onSuccess {
         synchronized(uploadQueue) { uploadQueue.subList(0, minOf(batch.size, uploadQueue.size)).clear() }
         uploadInfo = uploadInfo.copy(enabled = true, sentRows = it, lastOkAtMs = System.currentTimeMillis(), lastError = null)
       }
       .onFailure { uploadInfo = uploadInfo.copy(enabled = true, lastError = it.message) }
+      .isSuccess
   }
 
   /** Kružni spremnik uzoraka za grafove uživo. */

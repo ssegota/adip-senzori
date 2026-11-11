@@ -18,6 +18,7 @@ import androidx.core.content.ContextCompat
 import hr.adip.senzori.AdipApp
 import hr.adip.senzori.MainActivity
 import hr.adip.senzori.R
+import hr.adip.senzori.data.SessionMode
 
 /**
  * Foreground servis koji drži mjerenje živim dok se snima (i kad je ekran ugašen).
@@ -33,6 +34,8 @@ class MeasurementService : Service() {
       AdipApp.get(this).engine.stopRecording(this)
       return START_NOT_STICKY
     }
+    val mode = runCatching { SessionMode.valueOf(intent?.getStringExtra(EXTRA_MODE) ?: "") }
+      .getOrDefault(AdipApp.get(this).engine.state.value.sessionMode ?: SessionMode.RECORD)
     val nm = getSystemService(NotificationManager::class.java)
     if (Build.VERSION.SDK_INT >= 26) {
       nm.createNotificationChannel(NotificationChannel(CHANNEL, "Snimanje mjerenja", NotificationManager.IMPORTANCE_LOW))
@@ -41,8 +44,20 @@ class MeasurementService : Service() {
     val stop = PendingIntent.getService(this, 1, Intent(this, MeasurementService::class.java).setAction(ACTION_STOP), PendingIntent.FLAG_IMMUTABLE)
     val n: Notification = NotificationCompat.Builder(this, CHANNEL)
       .setSmallIcon(R.drawable.ic_stat_rec)
-      .setContentTitle("ADIP Senzori snima")
-      .setContentText("Akceleracija, svjetlo i infrazvuk se zapisuju u CSV")
+      .setContentTitle(
+        when (mode) {
+          SessionMode.STREAM -> "ADIP Senzori: stream uživo"
+          SessionMode.RECORD -> "ADIP Senzori snima"
+          SessionMode.BOTH -> "ADIP Senzori: stream + snimanje"
+        },
+      )
+      .setContentText(
+        when (mode) {
+          SessionMode.STREAM -> "Mjerenja se šalju na web servis"
+          SessionMode.RECORD -> "Mjerenja se zapisuju u CSV na uređaju"
+          SessionMode.BOTH -> "Mjerenja se šalju na web servis i zapisuju u CSV"
+        },
+      )
       .setUsesChronometer(true)
       .setOngoing(true)
       .setContentIntent(open)
@@ -56,7 +71,7 @@ class MeasurementService : Service() {
       wakeLock = getSystemService(PowerManager::class.java)
         .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "adip:snimanje").apply { acquire(24 * 3600_000L) }
     }
-    AdipApp.get(this).engine.beginRecording()
+    AdipApp.get(this).engine.beginRecording(mode)
     return START_NOT_STICKY
   }
 
@@ -71,5 +86,6 @@ class MeasurementService : Service() {
     private const val CHANNEL = "snimanje"
     private const val NOTIF_ID = 42
     private const val ACTION_STOP = "hr.adip.senzori.STOP"
+    const val EXTRA_MODE = "mode"
   }
 }

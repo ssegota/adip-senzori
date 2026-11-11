@@ -131,9 +131,7 @@ fun SettingsScreen(
       CreateToken(client, settings) { t ->
         scope.launch { repo.update { it.copy(serverToken = t) }; tokenGen++ }
       }
-      SwitchRow("Slanje uživo", "Šalji podatke na server tijekom snimanja", settings.liveUploadEnabled) { v ->
-        update { it.copy(liveUploadEnabled = v) }
-      }
+      Hint("Stream (slanje uživo), snimanje ili oboje biraš na ekranu Mjerenje, pored gumba Start.")
       NumberField(
         label = "Interval slanja (s)",
         value = settings.uploadBatchSeconds.toFloat(),

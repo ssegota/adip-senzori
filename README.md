@@ -320,14 +320,26 @@ Primjer paketa koji aplikacija šalje:
 
 Na serveru se svaka sesija sprema kao `data/senzori/<sessionId>.csv`, istog formata kao na mobitelu, a metapodaci u `data/senzori/index.json`. Deploy ne dira mapu `data/`, pa podaci prežive svaki deploy.
 
-### Kako aplikacija šalje
+### Načini rada: Stream, Snimanje, Oboje
 
-**Uživo**, kad je u postavkama uključeno "Slanje uživo":
+Na ekranu **Mjerenje**, iznad gumba Start, bira se način. Aplikacija pamti zadnji odabir.
 
-- Za vrijeme snimanja uzorci idu u red, a svakih *N* sekundi (postavka, zadano 5 s) šalje se paket od najviše 5000 redova na `/batch`.
+| Način | CSV na mobitelu | Slanje na adip.hr |
+|---|---|---|
+| **Stream** | ne | da, uživo |
+| **Snimanje** | da | ne (može se poslati naknadno) |
+| **Oboje** | da | da, uživo |
+
+Za Stream i Oboje potreban je token (Postavke → Web servis → **Dohvati token**). Bez tokena je gumb Start onemogućen i aplikacija javlja što nedostaje.
+
+Kako stream radi:
+
+- Uzorci idu u red, a svakih *N* sekundi (postavka "Interval slanja", zadano 2 s) šalje se paket od najviše 5000 redova na `/batch`.
 - Ako slanje ne uspije (nema mreže, server nedostupan), redovi ostaju u redu i šalju se sljedeći put. Red ima najviše 200 000 redova; najstariji se odbacuju.
-- Kad se snimanje zaustavi, šalje se ostatak reda.
-- CSV na mobitelu se piše uvijek, neovisno o slanju. Server je kopija, ne zamjena.
+- Kad se sesija zaustavi, šalje se ostatak reda, u više paketa ako treba.
+- Na ploči se vidi status, npr. `Poslano 535 · čeka 114 · OK prije 2 s`.
+- Na <https://adip.hr/senzori/> sesija dobiva oznaku **UŽIVO** i grafovi se sami osvježavaju.
+- I stream i snimanje rade s ugašenim ekranom i u noćnom načinu, uz obavijest u traci.
 
 **Naknadno:** na ekranu *Zapisi* odabire se zapis i "Pošalji na server", što šalje cijeli CSV multipartom na `/upload`. ID sesije je isti kao pri slanju uživo (`<ime_datoteke>_<prvih 8 znakova deviceId>`), pa naknadno slanje zamjenjuje nepotpunu sesiju iz slanja uživo.
 
@@ -364,7 +376,7 @@ Navigacija je donja traka s četiri kartice. Ikona mjeseca u gornjoj traci uklju
   - stupčasti spektar 0–20 Hz i vremenski graf;
   - status izvora i gumb za dozvolu mikrofona.
 - **Barometar**, ako postoji.
-- Gumb za **početak i kraj snimanja** s trajanjem, brojem redova i statusom slanja.
+- Izbor načina **Stream / Snimanje / Oboje** i gumb **Start/Stop** s trajanjem, brojem redova i statusom slanja.
 
 **Grafovi i prošle vrijednosti:**
 
@@ -417,8 +429,7 @@ Svijetla, tamna ili po sustavu (postavka). Paleta je tamnoplava "noćno nebo" s 
 | Drži ekran upaljen | uključeno | `FLAG_KEEP_SCREEN_ON` dok je aplikacija otvorena |
 | URL servisa | `https://adip.hr` | Osnovni URL web servisa |
 | Token | prazno | Token uređaja za slanje; gumb **Dohvati token** ga kreira uz lozinku |
-| Slanje uživo | isključeno | Slanje paketa za vrijeme snimanja |
-| Interval slanja | 5 s | Koliko se često šalje paket |
+| Interval slanja | 2 s | Koliko se često šalje paket pri streamu |
 | Kalibracija libele | 0°, 0° | Postavlja se gumbom na ekranu Libela |
 
 Postavke se spremaju u DataStore (`postavke.preferences_pb`).

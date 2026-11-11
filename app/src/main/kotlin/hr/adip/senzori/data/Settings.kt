@@ -13,6 +13,13 @@ import kotlinx.coroutines.flow.map
 
 enum class ThemeMode { SYSTEM, LIGHT, DARK }
 
+/** Način rada sesije mjerenja. */
+enum class SessionMode(val label: String, val records: Boolean, val streams: Boolean) {
+  STREAM("Stream", records = false, streams = true),
+  RECORD("Snimanje", records = true, streams = false),
+  BOTH("Stream + snimanje", records = true, streams = true),
+}
+
 /** Sve korisničke postavke aplikacije. */
 data class AppSettings(
   /** Fiksna frekvencija uzorkovanja zapisa (Hz). */
@@ -26,9 +33,9 @@ data class AppSettings(
   /** Web servis (adip.hr) */
   val serverUrl: String = "https://adip.hr",
   val serverToken: String = "",
-  /** Šalji podatke uživo na server tijekom snimanja. */
-  val liveUploadEnabled: Boolean = false,
-  val uploadBatchSeconds: Int = 5,
+  /** Zadnji odabrani način: stream (slanje uživo), snimanje (CSV) ili oboje. */
+  val sessionMode: SessionMode = SessionMode.RECORD,
+  val uploadBatchSeconds: Int = 2,
   /** Kalibracija libele (offset kutova u stupnjevima). */
   val levelOffsetPitch: Float = 0f,
   val levelOffsetRoll: Float = 0f,
@@ -51,7 +58,7 @@ class SettingsRepository(private val context: Context) {
     val keepOn = booleanPreferencesKey("keep_screen_on")
     val url = stringPreferencesKey("server_url")
     val token = stringPreferencesKey("server_token")
-    val live = booleanPreferencesKey("live_upload")
+    val mode = stringPreferencesKey("session_mode")
     val batch = intPreferencesKey("upload_batch_s")
     val lvlP = floatPreferencesKey("level_off_pitch")
     val lvlR = floatPreferencesKey("level_off_roll")
@@ -69,7 +76,7 @@ class SettingsRepository(private val context: Context) {
       p[K.keepOn] = s.keepScreenOn
       p[K.url] = s.serverUrl
       p[K.token] = s.serverToken
-      p[K.live] = s.liveUploadEnabled
+      p[K.mode] = s.sessionMode.name
       p[K.batch] = s.uploadBatchSeconds
       p[K.lvlP] = s.levelOffsetPitch
       p[K.lvlR] = s.levelOffsetRoll
@@ -86,7 +93,7 @@ class SettingsRepository(private val context: Context) {
       keepScreenOn = this[K.keepOn] ?: d.keepScreenOn,
       serverUrl = this[K.url] ?: d.serverUrl,
       serverToken = this[K.token] ?: d.serverToken,
-      liveUploadEnabled = this[K.live] ?: d.liveUploadEnabled,
+      sessionMode = runCatching { SessionMode.valueOf(this[K.mode] ?: "") }.getOrDefault(d.sessionMode),
       uploadBatchSeconds = this[K.batch] ?: d.uploadBatchSeconds,
       levelOffsetPitch = this[K.lvlP] ?: d.levelOffsetPitch,
       levelOffsetRoll = this[K.lvlR] ?: d.levelOffsetRoll,

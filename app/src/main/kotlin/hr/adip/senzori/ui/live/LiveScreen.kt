@@ -69,6 +69,13 @@ import hr.adip.senzori.ui.theme.ChartColors
 import hr.adip.senzori.ui.theme.NumberStyles
 import kotlinx.coroutines.flow.StateFlow
 import kotlin.math.sqrt
+import androidx.compose.material3.SegmentedButton
+import androidx.compose.material3.SegmentedButtonDefaults
+import androidx.compose.material3.SingleChoiceSegmentedButtonRow
+import androidx.compose.runtime.rememberCoroutineScope
+import hr.adip.senzori.AdipApp
+import hr.adip.senzori.data.SessionMode
+import kotlinx.coroutines.launch
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.calculatePan
@@ -98,7 +105,7 @@ fun LiveScreen(engine: SensorEngine, settings: AppSettings, contentPadding: Padd
       .padding(horizontal = 16.dp, vertical = 12.dp),
     verticalArrangement = Arrangement.spacedBy(12.dp),
   ) {
-    RecordPanel(engine)
+    RecordPanel(engine, settings)
     PastBar(view)
     AccelCard(state, view)
     LightCard(state, view)
@@ -117,26 +124,31 @@ private data class RecUi(
   val rate: Int,
   val running: Boolean,
   val upload: hr.adip.senzori.sensor.UploadInfo,
+  val mode: SessionMode?,
 )
 
 @Composable
-private fun RecordPanel(engine: SensorEngine) {
+private fun RecordPanel(engine: SensorEngine, settings: AppSettings) {
   val context = LocalContext.current
-  val ui by engine.state.select { RecUi(it.recording, it.recordingStartedMs, it.recordedRows, it.sampleRateHz, it.running, it.upload) }
+  val scope = rememberCoroutineScope()
+  val ui by engine.state.select { RecUi(it.recording, it.recordingStartedMs, it.recordedRows, it.sampleRateHz, it.running, it.upload, it.sessionMode) }
+  val selected = settings.sessionMode
+  val needsToken = selected.streams && settings.serverToken.isBlank()
   val elapsed by rememberElapsedSeconds(ui.recording, ui.startedMs)
 
   val notifLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {
     // neovisno o odgovoru – obavijest nije nužna za snimanje
-    engine.startRecording(context)
+    engine.startRecording(context, selected)
   }
 
   fun onStart() {
+    if (needsToken) return
     if (Build.VERSION.SDK_INT >= 33 &&
       ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
     ) {
       notifLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
     } else {
-      engine.startRecording(context)
+      engine.startRecording(context, selected)
     }
   }
 
@@ -151,7 +163,13 @@ private fun RecordPanel(engine: SensorEngine) {
       Row(verticalAlignment = Alignment.CenterVertically) {
         Column(Modifier.weight(1f)) {
           Text(
-            if (ui.recording) "Snimanje u tijeku" else if (ui.running) "Mjerenje uživo" else "Mjerenje zaustavljeno",
+            when {
+              ui.recording && ui.mode == SessionMode.STREAM -> "Stream u tijeku"
+              ui.recording && ui.mode == SessionMode.BOTH -> "Stream + snimanje u tijeku"
+              ui.recording -> "Snimanje u tijeku"
+              ui.running -> "Mjerenje uživo"
+              else -> "Mjerenje zaustavljeno"
+            },
             style = MaterialTheme.typography.labelLarge,
             color = onContainer,
           )
@@ -161,7 +179,11 @@ private fun RecordPanel(engine: SensorEngine) {
             color = onContainer,
           )
           Text(
-            if (ui.recording) "${ui.rows} redaka" else "Pritisni Start za CSV zapis",
+            if (ui.recording) "${ui.rows} redaka" else when (selected) {
+              SessionMode.STREAM -> "Start šalje mjerenja na ${settings.serverUrl.removePrefix("https://")}"
+              SessionMode.RECORD -> "Start zapisuje mjerenja u CSV"
+              SessionMode.BOTH -> "Start šalje mjerenja i zapisuje CSV"
+            },
             style = NumberStyles.small,
             color = onContainer.copy(alpha = 0.8f),
           )
@@ -183,12 +205,38 @@ private fun RecordPanel(engine: SensorEngine) {
               Text("Stop")
             }
           } else {
-            Button(onClick = ::onStart, contentPadding = PaddingValues(horizontal = 20.dp, vertical = 14.dp)) {
+            Button(onClick = ::onStart, enabled = !needsToken, contentPadding = PaddingValues(horizontal = 20.dp, vertical = 14.dp)) {
               Icon(Icons.Filled.FiberManualRecord, null, tint = Color(0xFFFF5A5F))
               Spacer(Modifier.width(6.dp))
               Text("Start")
             }
           }
+        }
+      }
+      if (!ui.recording) {
+        val modes = SessionMode.entries
+        SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
+          modes.forEachIndexed { i, m ->
+            SegmentedButton(
+              selected = selected == m,
+              onClick = { scope.launch { AdipApp.get(context).settings.update { it.copy(sessionMode = m) } } },
+              shape = SegmentedButtonDefaults.itemShape(i, modes.size),
+              icon = {},
+              label = {
+                Text(
+                  when (m) { SessionMode.STREAM -> "Stream"; SessionMode.RECORD -> "Snimanje"; SessionMode.BOTH -> "Oboje" },
+                  style = MaterialTheme.typography.labelMedium,
+                )
+              },
+            )
+          }
+        }
+        if (needsToken) {
+          Text(
+            "Za stream je potreban token: Postavke → Web servis → Dohvati token.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.error,
+          )
         }
       }
       AnimatedVisibility(ui.recording && ui.upload.enabled) { UploadLine(ui.upload, onContainer) }
