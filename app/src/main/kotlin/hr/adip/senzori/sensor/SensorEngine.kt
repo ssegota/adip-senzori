@@ -73,8 +73,9 @@ class SensorEngine(
   private var uploadJob: Job? = null
   private var runningRate = 0
 
-  // Povijest (~10 s)
+  // Povijest (~10 s) za prikaz uživo + duža povijest (10 min) za pregled prošlosti
   private var hist = Ring(10 * 50)
+  @Volatile private var longHist = Ring(LONG_HISTORY_S * 50)
 
   // Snimanje
   @Volatile private var recorder: CsvRecorder? = null
@@ -119,6 +120,7 @@ class SensorEngine(
     val rate = s.sampleRateHz.coerceIn(1, 500)
     runningRate = rate
     hist = Ring(max(rate * 10, 100))
+    longHist = Ring(rate * LONG_HISTORY_S)
     val ht = HandlerThread("senzori").also { it.start() }
     sensorThread = ht
     val h = Handler(ht.looper)
@@ -185,6 +187,7 @@ class SensorEngine(
       val inf = infra?.takeIf { it.info.available }?.latest
       val s = Sample(t0Wall + n * periodNs / 1_000_000, ax, ay, az, lux, inf, pHpa)
       hist.add(s)
+      longHist.add(s)
       recorder?.let { r ->
         r.write(s)
         if (settings.liveUploadEnabled) synchronized(uploadQueue) {
@@ -211,6 +214,10 @@ class SensorEngine(
       }
     }
   }
+
+  /** Snimka duže povijesti (do 10 min) za pregled prošlih vrijednosti. */
+  fun pastHistory(lastSeconds: Float? = null): History =
+    longHist.snapshot(lastSeconds?.let { (it * runningRate.coerceAtLeast(1)).toInt() })
 
   // ---------------- snimanje ----------------
 
@@ -308,15 +315,18 @@ class SensorEngine(
 
     fun last() = lastSample
 
-    @Synchronized fun snapshot(): History {
-      val start = (pos - count + cap) % cap
-      fun f(a: FloatArray) = FloatArray(count) { a[(start + it) % cap] }
-      return History(LongArray(count) { t[(start + it) % cap] }, f(v[0]), f(v[1]), f(v[2]), f(v[3]), f(v[4]))
+    /** Kopija zadnjih [last] uzoraka (ili svih). */
+    @Synchronized fun snapshot(last: Int? = null): History {
+      val n = if (last == null) count else minOf(count, last.coerceAtLeast(0))
+      val start = (pos - n + cap) % cap
+      fun f(a: FloatArray) = FloatArray(n) { a[(start + it) % cap] }
+      return History(LongArray(n) { t[(start + it) % cap] }, f(v[0]), f(v[1]), f(v[2]), f(v[3]), f(v[4]))
     }
   }
 
   companion object {
     private const val MAX_QUEUE = 200_000
+    const val LONG_HISTORY_S = 600
     private const val BATCH_MAX = 5_000
   }
 }

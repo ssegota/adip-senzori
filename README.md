@@ -290,17 +290,21 @@ Radi na produkciji: <https://adip.hr/api/senzori/status>. Detalji su u [`server/
 
 ### API
 
-Autentikacija ide zaglavljem `Authorization: Bearer <token>`. Samo `/status` radi bez tokena.
+**Čitanje je javno**, a za **pisanje treba token**. Token se kreira uz lozinku društva, a svaki uređaj dobiva svoj token koji se može opozvati. Lozinka nije u repozitoriju, nego samo njezin scrypt hash. Nakon 10 pogrešnih pokušaja s iste IP adrese u 15 minuta server vraća 429.
 
-| Metoda | Ruta | Opis |
-|---|---|---|
-| GET | `/api/senzori/status` | `{ok, service, version, time}` |
-| POST | `/api/senzori/batch` | Paket redova uživo (JSON, do 2 MB); prvi paket stvara sesiju, sljedeći se dodaju |
-| POST | `/api/senzori/upload` | Cijeli CSV (multipart, polje `file`, do 50 MB); stvara sesiju ili je zamjenjuje |
-| GET | `/api/senzori/sesije` | Popis sesija, najnovije prve |
-| GET | `/api/senzori/sesije/:id?limit=N` | Metapodaci i zadnjih N redova kao JSON |
-| GET | `/api/senzori/sesije/:id/csv` | Preuzimanje CSV-a |
-| DELETE | `/api/senzori/sesije/:id` | Brisanje sesije |
+| Metoda | Ruta | Autentikacija | Opis |
+|---|---|---|---|
+| GET | `/api/senzori/status` | – | `{ok, service, version, time}` |
+| POST | `/api/senzori/tokeni` | lozinka u tijelu `{lozinka, naziv}` | Novi token `{token, id, naziv, created}`; token se prikazuje samo jednom |
+| GET | `/api/senzori/token` | `Bearer <token>` | Provjera tokena: `{id, naziv, created}` ili 401 |
+| GET | `/api/senzori/tokeni` | `X-Senzori-Lozinka` | Popis tokena |
+| DELETE | `/api/senzori/tokeni/:id` | `X-Senzori-Lozinka` | Opoziv tokena |
+| POST | `/api/senzori/batch` | `Bearer <token>` | Paket redova uživo (JSON, do 2 MB); prvi paket stvara sesiju, sljedeći se dodaju |
+| POST | `/api/senzori/upload` | `Bearer <token>` | Cijeli CSV (multipart, polje `file`, do 50 MB); stvara sesiju ili je zamjenjuje |
+| GET | `/api/senzori/sesije` | – | Popis sesija, najnovije prve (bez `deviceId`) |
+| GET | `/api/senzori/sesije/:id?limit=N` | – | Metapodaci i zadnjih N redova kao JSON |
+| GET | `/api/senzori/sesije/:id/csv` | – | Preuzimanje CSV-a |
+| DELETE | `/api/senzori/sesije/:id` | token ili `X-Senzori-Lozinka` | Brisanje sesije |
 
 Primjer paketa koji aplikacija šalje:
 
@@ -327,19 +331,23 @@ Na serveru se svaka sesija sprema kao `data/senzori/<sessionId>.csv`, istog form
 
 **Naknadno:** na ekranu *Zapisi* odabire se zapis i "Pošalji na server", što šalje cijeli CSV multipartom na `/upload`. ID sesije je isti kao pri slanju uživo (`<ime_datoteke>_<prvih 8 znakova deviceId>`), pa naknadno slanje zamjenjuje nepotpunu sesiju iz slanja uživo.
 
-**Provjera veze:** gumb "Testiraj vezu" u postavkama poziva `/status`, a zatim `/sesije` s tokenom. Tako javlja i radi li server i je li token ispravan.
+**Token:** u postavkama gumb **Dohvati token** otvara dijalog za naziv uređaja i lozinku društva. Aplikacija poziva `POST /tokeni` i spremi dobiveni token, a lozinku ne pamti. Token se može kreirati i na web stranici (odjeljak "Tokeni za aplikaciju") i upisati ručno.
+
+**Provjera veze:** gumb "Testiraj vezu" poziva `/status`, a zatim `/token`. Tako javlja i radi li server i je li token ispravan.
 
 `deviceId` je nasumični UUID generiran pri prvom pokretanju. Nije vezan uz hardver ni korisnika.
 
-### Ugradnja u web stranicu (sljedeći korak)
+### Web stranica: <https://adip.hr/senzori/>
 
-API je spreman, ali na stranici još **nema prikaza** podataka. Kad bude trebao, dovoljna je statička stranica (npr. `servisi/senzori.html`) koja:
+![Web stranica ADIP Senzori](docs/web.png)
 
-1. dohvati popis sesija s `GET /api/senzori/sesije`;
-2. za odabranu sesiju periodično povlači `GET /api/senzori/sesije/:id?limit=3000` (za uživo, svakih nekoliko sekundi) i crta grafove;
-3. nudi preuzimanje preko `/csv`.
-
-Prije toga treba riješiti autentikaciju (vidi dolje).
+- **Sesije:** popis svih sesija, najnovije prve. Sesija koja je primila podatke u zadnjih 30 s dobiva oznaku **UŽIVO**.
+- **Grafovi:** za odabranu sesiju akceleracija, osvjetljenje, infrazvuk i tlak, svi na istoj vremenskoj osi.
+- **Uživo:** stranica svakih nekoliko sekundi povlači nove podatke.
+- **Preuzimanje** CSV-a.
+- **Tokeni za aplikaciju:** uz lozinku se kreiraju, pregledavaju i opozivaju tokeni, a mogu se i brisati sesije.
+- **Pronalaženje:** stranica je povezana s kartice "ADIP Senzori" na stranici Servisi.
+- **Više mobitela:** server prima podatke s više mobitela istovremeno, svaki u svojoj sesiji. Stranica prikazuje jednu sesiju odjednom.
 
 ---
 
@@ -349,7 +357,7 @@ Navigacija je donja traka s četiri kartice. Ikona mjeseca u gornjoj traci uklju
 
 ### Mjerenje
 
-- **Akceleracija:** x, y, z i |a| u m/s² te graf zadnjih 10 s s tri krivulje.
+- **Akceleracija:** x, y, z i |a| u m/s² te graf s tri krivulje.
 - **Luksmetar:** velika vrijednost u lx i graf; "nije dostupno" ako uređaj nema senzor svjetla.
 - **Infrazvuk:**
   - razina (dBFS ili dB SPL), RMS i dominantna frekvencija;
@@ -357,6 +365,13 @@ Navigacija je donja traka s četiri kartice. Ikona mjeseca u gornjoj traci uklju
   - status izvora i gumb za dozvolu mikrofona.
 - **Barometar**, ako postoji.
 - Gumb za **početak i kraj snimanja** s trajanjem, brojem redova i statusom slanja.
+
+**Grafovi i prošle vrijednosti:**
+
+- **Os x je konstantna:** prozor od 10 s (od −10 s do 0) na svim grafovima, i dok podataka još nema dovoljno.
+- **Povlačenje grafa udesno** prelazi u *pregled prošlosti*. Prikaz se zamrzne, a moguće je ići do **10 minuta unatrag**. Mjerenje i snimanje teku dalje, a gumb **Uživo ▸** vraća praćenje.
+- **Dva prsta** mijenjaju širinu prozora, od 2 s do 2 min.
+- Svi grafovi na ekranu pomiču se zajedno.
 
 ### Libela
 
@@ -369,6 +384,7 @@ Navigacija je donja traka s četiri kartice. Ikona mjeseca u gornjoj traci uklju
 
 - Popis CSV zapisa. Akcije za svaki zapis su otvori, podijeli, pošalji na server i obriši (uz potvrdu).
 - Detalj zapisa prikazuje grafove po kanalu, statistiku i metapodatke.
+- **Os x** ide od 0 do kraja zapisa i ista je za sve grafove. Dva prsta zumiraju, a vodoravno povlačenje pomiče prikaz kroz zapis.
 
 ### Postavke
 
@@ -400,7 +416,7 @@ Svijetla, tamna ili po sustavu (postavka). Paleta je tamnoplava "noćno nebo" s 
 | Tema | Sustav | Sustav / Svijetla / Tamna |
 | Drži ekran upaljen | uključeno | `FLAG_KEEP_SCREEN_ON` dok je aplikacija otvorena |
 | URL servisa | `https://adip.hr` | Osnovni URL web servisa |
-| Token | prazno | Bearer token za `/api/senzori` |
+| Token | prazno | Token uređaja za slanje; gumb **Dohvati token** ga kreira uz lozinku |
 | Slanje uživo | isključeno | Slanje paketa za vrijeme snimanja |
 | Interval slanja | 5 s | Koliko se često šalje paket |
 | Kalibracija libele | 0°, 0° | Postavlja se gumbom na ekranu Libela |
@@ -457,9 +473,9 @@ adip-senzori/
 
 ## Ograničenja i daljnji rad
 
-- **Autentikacija:** servis trenutno koristi isti fiksni token kao admin panel adip-weba (`fake-jwt-token-adip`). Prije javne objave treba uvesti prave tokene, idealno token po uređaju s mogućnošću opoziva, i ograničiti brzinu zahtjeva.
+- **Lozinka društva** je jedna za sve. Mijenja se postavljanjem novog hasha u `SENZORI_LOZINKA_HASH` (cPanel), a upute su u `server/README.md`. Postojeći tokeni ostaju važeći dok se ne opozovu.
+- **Usporedni prikaz više mobitela** na web stranici još nije napravljen.
 - **Infrazvuk je relativan** bez kalibracije, a odziv mikrofona ispod ~10 Hz ovisi o modelu mobitela. Za znanstvenu upotrebu treba izmjeriti frekvencijski odziv svakog modela i uvesti korekcijski filtar.
 - **Vremenska točnost:** vremenske oznake su idealne (`t0 + n·T`), ali `t0` dolazi iz sata mobitela. Za usporedbu više uređaja treba sinkronizirati sat (NTP/GPS) ili dodati GPS vrijeme.
 - **Frekvencija od 200 Hz:** infrazvučni kanal se interno računa na ~100 Hz, pa se kod zapisa od 200 Hz svaka vrijednost ponavlja dvaput. Pojas do 20 Hz je i tako u potpunosti pokriven.
-- **Prikaz na webu:** API je spreman, stranica za pregled podataka još nije napravljena.
 - **Mogući dodaci:** GPS lokacija u metapodacima, žiroskop i magnetometar, okidač snimanja na prag (npr. bolid), automatsko slanje zapisa kad se pojavi Wi-Fi.

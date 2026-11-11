@@ -69,6 +69,18 @@ import hr.adip.senzori.ui.theme.ChartColors
 import hr.adip.senzori.ui.theme.NumberStyles
 import kotlinx.coroutines.flow.StateFlow
 import kotlin.math.sqrt
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.calculatePan
+import androidx.compose.foundation.gestures.calculateZoom
+import androidx.compose.runtime.Stable
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.positionChange
+import androidx.compose.ui.input.pointer.positionChanged
+import hr.adip.senzori.sensor.History
+import kotlin.math.abs
+
 
 @Composable
 fun LiveScreen(engine: SensorEngine, settings: AppSettings, contentPadding: PaddingValues) {
@@ -77,6 +89,7 @@ fun LiveScreen(engine: SensorEngine, settings: AppSettings, contentPadding: Padd
     onPauseOrDispose { }
   }
   val state = engine.state
+  val view = remember(engine) { LiveView(engine) }
   Column(
     Modifier
       .fillMaxSize()
@@ -86,9 +99,10 @@ fun LiveScreen(engine: SensorEngine, settings: AppSettings, contentPadding: Padd
     verticalArrangement = Arrangement.spacedBy(12.dp),
   ) {
     RecordPanel(engine)
-    AccelCard(state)
-    LightCard(state)
-    InfraCard(engine, settings)
+    PastBar(view)
+    AccelCard(state, view)
+    LightCard(state, view)
+    InfraCard(engine, settings, view)
     PressureCard(state)
     Spacer(Modifier.height(8.dp))
   }
@@ -205,7 +219,7 @@ private fun UploadLine(u: hr.adip.senzori.sensor.UploadInfo, color: Color) {
 // ---------------------------------------------------------------- akceleracija
 
 @Composable
-private fun AccelCard(state: StateFlow<EngineState>) {
+private fun AccelCard(state: StateFlow<EngineState>, view: LiveView) {
   SensorCard("Akceleracija", Icons.Outlined.Vibration) {
     val latest by state.select { it.latest }
     val s = latest
@@ -217,15 +231,16 @@ private fun AccelCard(state: StateFlow<EngineState>) {
       AxisValue("|a|", mag, MaterialTheme.colorScheme.onSurface)
     }
     val history by state.select { it.history }
-    val h = history
+    val v = view.frame(history)
+    val h = v.h
     LineChart(
       series = listOf(h.ax, h.ay, h.az),
       colors = listOf(ChartColors.X, ChartColors.Y, ChartColors.Z),
-      modifier = Modifier.fillMaxWidth().height(150.dp),
+      modifier = Modifier.fillMaxWidth().height(150.dp).liveScroll(view),
       yLabel = "m/s²",
-      xStart = -LIVE_WINDOW_S,
-      xEnd = 0f,
-      t = h.relTimes(),
+      xStart = v.xStart,
+      xEnd = v.xEnd,
+      t = v.t,
       minSpan = 0.5f,
     )
     Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -245,7 +260,7 @@ private fun AxisValue(label: String, v: Float?, color: Color) {
 // ---------------------------------------------------------------- svjetlo
 
 @Composable
-private fun LightCard(state: StateFlow<EngineState>) {
+private fun LightCard(state: StateFlow<EngineState>, view: LiveView) {
   val hasLight by state.select { it.hasLight }
   SensorCard("Luksmetar", Icons.Outlined.LightMode) {
     if (!hasLight) {
@@ -259,13 +274,14 @@ private fun LightCard(state: StateFlow<EngineState>) {
       Text("lx", style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(bottom = 6.dp))
     }
     val history by state.select { it.history }
+    val v = view.frame(history)
     LineChart(
-      series = listOf(history.lux),
+      series = listOf(v.h.lux),
       colors = listOf(ChartColors.Lux),
-      xStart = -LIVE_WINDOW_S,
-      xEnd = 0f,
-      t = history.relTimes(),
-      modifier = Modifier.fillMaxWidth().height(80.dp),
+      xStart = v.xStart,
+      xEnd = v.xEnd,
+      t = v.t,
+      modifier = Modifier.fillMaxWidth().height(80.dp).liveScroll(view),
       minSpan = 2f,
       includeZero = true,
     )
@@ -275,7 +291,7 @@ private fun LightCard(state: StateFlow<EngineState>) {
 // ---------------------------------------------------------------- infrazvuk
 
 @Composable
-private fun InfraCard(engine: SensorEngine, settings: AppSettings) {
+private fun InfraCard(engine: SensorEngine, settings: AppSettings, view: LiveView) {
   val context = LocalContext.current
   val state = engine.state
   var granted by remember {
@@ -337,13 +353,14 @@ private fun InfraCard(engine: SensorEngine, settings: AppSettings) {
     )
     Text("Signal (0,5–20 Hz)", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
     val history by state.select { it.history }
+    val v = view.frame(history)
     LineChart(
-      series = listOf(history.infra),
+      series = listOf(v.h.infra),
       colors = listOf(ChartColors.Infra),
-      xStart = -LIVE_WINDOW_S,
-      xEnd = 0f,
-      t = history.relTimes(),
-      modifier = Modifier.fillMaxWidth().height(100.dp),
+      xStart = v.xStart,
+      xEnd = v.xEnd,
+      t = v.t,
+      modifier = Modifier.fillMaxWidth().height(100.dp).liveScroll(view),
       yLabel = if (i.calibrated) "Pa" else "FS",
       minSpan = if (i.calibrated) 0.01f else 1e-5f,
     )
@@ -367,8 +384,109 @@ private fun PressureCard(state: StateFlow<EngineState>) {
   }
 }
 
-/** Konstantna x skala grafova uživo: zadnjih 10 s. */
+/** Zadana širina prozora grafova uživo (s). */
 private const val LIVE_WINDOW_S = 10f
+
+/** Podaci za jedan kadar grafa: povijest + fiksni raspon osi + vremena uzoraka (s, zadnji = 0). */
+class LiveFrame(val h: History, val xStart: Float, val xEnd: Float, val t: FloatArray)
+
+/**
+ * Stanje prikaza grafova uživo, zajedničko svim grafovima na ekranu.
+ *  - Praćenje (zadano): prozor širine [windowS] koji završava sa zadnjim uzorkom.
+ *  - Pregled prošlosti: povlačenjem grafa udesno zamrzava se snimka do 10 min povijesti
+ *    i prozor se pomiče unatrag ([endOffsetS] s od zadnjeg uzorka). Gumb "Uživo" vraća praćenje.
+ *  - Dva prsta mijenjaju širinu prozora (2 s – 2 min), os ostaje konstantne širine.
+ */
+@Stable
+class LiveView(private val engine: SensorEngine) {
+  var windowS by mutableFloatStateOf(LIVE_WINDOW_S)
+  var paused by mutableStateOf(false); private set
+  var frozen by mutableStateOf<History?>(null); private set
+  var endOffsetS by mutableFloatStateOf(0f)
+
+  /** Ukupno trajanje dostupne povijesti (s). */
+  val spanS: Float get() = frozen?.let { if (it.size > 1) (it.tMs[it.size - 1] - it.tMs[0]) / 1000f else 0f } ?: 0f
+
+  fun pause() {
+    if (paused) return
+    frozen = engine.pastHistory()
+    endOffsetS = 0f
+    paused = true
+  }
+
+  fun resume() { paused = false; frozen = null; endOffsetS = 0f }
+
+  fun panBySeconds(ds: Float) {
+    if (!paused) pause()
+    endOffsetS = (endOffsetS + ds).coerceIn(0f, (spanS - windowS).coerceAtLeast(0f))
+  }
+
+  fun zoom(factor: Float) {
+    windowS = (windowS / factor).coerceIn(2f, 120f)
+    if (paused) endOffsetS = endOffsetS.coerceIn(0f, (spanS - windowS).coerceAtLeast(0f))
+  }
+
+  /** Za live povijest: grafovi u praćenju koriste kratku povijest, u pregledu zamrznutu dugu. */
+  fun frame(live: History): LiveFrame {
+    val h = if (paused) frozen ?: live else if (windowS > LIVE_WINDOW_S) engine.pastHistory(windowS + 1f) else live
+    return LiveFrame(h, -(endOffsetS + windowS), -endOffsetS, h.relTimes())
+  }
+}
+
+/** Vodoravno povlačenje = pomak kroz prošlost; dva prsta = širina prozora. Okomito skrolanje ostaje. */
+private fun Modifier.liveScroll(view: LiveView): Modifier = pointerInput(view) {
+  awaitEachGesture {
+    awaitFirstDown(requireUnconsumed = false)
+    var locked = false
+    var dx = 0f
+    var dy = 0f
+    val slop = viewConfiguration.touchSlop
+    while (true) {
+      val ev = awaitPointerEvent()
+      if (ev.changes.none { it.pressed }) break
+      val pressed = ev.changes.count { it.pressed }
+      val pan = ev.calculatePan()
+      val zoom = ev.calculateZoom()
+      if (!locked) {
+        if (pressed >= 2) locked = true
+        else {
+          dx += pan.x; dy += pan.y
+          if (abs(dy) > slop && abs(dy) > abs(dx)) break
+          if (abs(dx) > slop) locked = true
+        }
+      }
+      if (locked) {
+        val w = (size.width - 44.dp.toPx()).coerceAtLeast(1f)
+        if (zoom != 1f) view.zoom(zoom)
+        if (pan.x != 0f) view.panBySeconds(pan.x / w * view.windowS)
+        ev.changes.forEach { if (it.positionChanged()) it.consume() }
+      }
+    }
+  }
+}
+
+/** Traka iznad grafova: širina prozora, stanje pregleda prošlosti i gumb za povratak na uživo. */
+@Composable
+private fun PastBar(view: LiveView) {
+  Row(
+    Modifier.fillMaxWidth().padding(horizontal = 4.dp),
+    verticalAlignment = Alignment.CenterVertically,
+  ) {
+    Text(
+      if (view.paused)
+        "Pregled prošlosti: ${fmt(-(view.endOffsetS + view.windowS), 0)} … ${fmt(-view.endOffsetS, 0)} s"
+      else "Prozor ${fmt(view.windowS, 0)} s · povuci graf za prošle vrijednosti",
+      style = MaterialTheme.typography.labelMedium,
+      color = MaterialTheme.colorScheme.onSurfaceVariant,
+      modifier = Modifier.weight(1f),
+    )
+    AnimatedVisibility(view.paused) {
+      FilledTonalButton(onClick = view::resume, contentPadding = PaddingValues(horizontal = 14.dp, vertical = 4.dp)) {
+        Text("Uživo ▸")
+      }
+    }
+  }
+}
 
 /** Vrijeme uzoraka u sekundama relativno prema zadnjem uzorku (zadnji = 0, stariji < 0). */
 private fun hr.adip.senzori.sensor.History.relTimes(): FloatArray {
