@@ -101,6 +101,7 @@ fun RecordingDetailScreen(repo: RecordingRepository, file: File, contentPadding:
 @Composable
 private fun DetailContent(d: RecordingData, window: androidx.compose.runtime.MutableState<ClosedFloatingPointRange<Float>>) {
   val durS = if (d.t.size > 1) (d.t.last() - d.t.first()) / 1000f else d.info.durationS.toFloat()
+  val relT = remember(d) { if (d.t.isEmpty()) FloatArray(0) else FloatArray(d.t.size) { (d.t[it] - d.t.first()) / 1000f } }
   val infraUnit = d.info.meta["units"]?.let { if (it.contains("infra=Pa")) "Pa" else "FS" } ?: ""
   val groups = remember(d) {
     val known = KNOWN.mapNotNull { g ->
@@ -133,6 +134,7 @@ private fun DetailContent(d: RecordingData, window: androidx.compose.runtime.Mut
           yLabel = g.unit.ifEmpty { null },
           xStart = 0f,
           xEnd = durS,
+          t = relT,
           window = window.value,
           minSpan = g.minSpan,
         )

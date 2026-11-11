@@ -19,6 +19,7 @@ import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.DrawScope
+import androidx.compose.ui.graphics.drawscope.clipRect
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChanged
@@ -72,7 +73,9 @@ internal fun formatTick(v: Float, step: Float): String {
  * Jednostavan linijski graf na Canvasu s automatskim skaliranjem i mrežom.
  *
  * @param series nizovi jednake duljine, ravnomjerno raspoređeni u vremenu; NaN = prekid linije
- * @param xStart/xEnd vremenska os (s) koja odgovara prvom/zadnjem uzorku – za oznake osi
+ * @param xStart/xEnd vremenska os (s). Ako je zadan [t], os je FIKSNA [xStart, xEnd] neovisno o podacima
+ *        (konstantna x skala); inače odgovara prvom/zadnjem uzorku.
+ * @param t vrijeme svakog uzorka (s), u istim jedinicama kao xStart/xEnd
  * @param window vidljivi dio [0..1] (zum po x)
  * @param minSpan minimalni raspon y (da se šum ne povećava preko cijelog grafa)
  */
@@ -88,6 +91,7 @@ fun LineChart(
   window: ClosedFloatingPointRange<Float> = 0f..1f,
   minSpan: Float = 0f,
   includeZero: Boolean = false,
+  t: FloatArray? = null,
 ) {
   val measurer = rememberTextMeasurer()
   val gridColor = MaterialTheme.colorScheme.outlineVariant
@@ -103,8 +107,33 @@ fun LineChart(
     val plotH = size.height - topPad - bottomPad
     if (plotW <= 0f || plotH <= 0f) return@Canvas
 
-    val i0 = if (n > 1) floor(window.start * (n - 1)).toInt().coerceIn(0, n - 1) else 0
-    val i1 = if (n > 1) ceil(window.endInclusive * (n - 1)).toInt().coerceIn(i0, n - 1) else 0
+    // Vidljivi raspon osi x (s) i indeksi uzoraka u njemu
+    val timeMode = t != null && xStart != null && xEnd != null && xEnd > xStart
+    val vs: Float
+    val ve: Float
+    val i0: Int
+    val i1: Int
+    if (timeMode) {
+      vs = xStart!! + (xEnd!! - xStart) * window.start
+      ve = xStart + (xEnd - xStart) * window.endInclusive
+      val tt = t!!
+      val m = min(n, tt.size)
+      var a = 0
+      while (a < m && tt[a] < vs) a++
+      var b = m - 1
+      while (b >= 0 && tt[b] > ve) b--
+      // jedan uzorak preko ruba s obje strane da linija dođe do osi
+      i0 = (a - 1).coerceAtLeast(0)
+      i1 = (b + 1).coerceAtMost(m - 1)
+    } else {
+      vs = if (xStart != null && xEnd != null) xStart + (xEnd - xStart) * window.start else 0f
+      ve = if (xStart != null && xEnd != null) xStart + (xEnd - xStart) * window.endInclusive else 1f
+      i0 = if (n > 1) floor(window.start * (n - 1)).toInt().coerceIn(0, n - 1) else 0
+      i1 = if (n > 1) ceil(window.endInclusive * (n - 1)).toInt().coerceIn(i0, n - 1) else 0
+    }
+    fun xOf(i: Int): Float =
+      if (timeMode) leftPad + plotW * (t!![i] - vs) / (ve - vs)
+      else leftPad + plotW * (i - i0) / max(1, i1 - i0).toFloat()
 
     // Autoskaliranje na vidljivom dijelu
     var lo = Float.POSITIVE_INFINITY
@@ -141,9 +170,7 @@ fun LineChart(
     }
 
     // Mreža x (vrijeme)
-    if (xStart != null && xEnd != null && n > 1) {
-      val vs = xStart + (xEnd - xStart) * window.start
-      val ve = xStart + (xEnd - xStart) * window.endInclusive
+    if (xStart != null && xEnd != null && (timeMode || n > 1)) {
       if (ve > vs) {
         val xs = niceStep(ve - vs, 5)
         var t = ceil(vs / xs) * xs
@@ -163,8 +190,8 @@ fun LineChart(
 
     // Linije
     if (i1 > i0) {
+      clipRect(leftPad, 0f, leftPad + plotW, size.height) {
       val stroke = Stroke(width = 1.6.dp.toPx(), cap = StrokeCap.Round, join = StrokeJoin.Round)
-      val count = (i1 - i0).toFloat()
       series.forEachIndexed { si, s ->
         val path = Path()
         var pen = false
@@ -172,11 +199,12 @@ fun LineChart(
         for (i in i0..e) {
           val v = s[i]
           if (!v.isFinite()) { pen = false; continue }
-          val x = leftPad + plotW * (i - i0) / count
+          val x = xOf(i)
           val y = yOf(v)
           if (pen) path.lineTo(x, y) else { path.moveTo(x, y); pen = true }
         }
         drawPath(path, colors.getOrElse(si) { Color.Gray }, style = stroke)
+      }
       }
     }
   }

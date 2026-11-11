@@ -223,8 +223,9 @@ private fun AccelCard(state: StateFlow<EngineState>) {
       colors = listOf(ChartColors.X, ChartColors.Y, ChartColors.Z),
       modifier = Modifier.fillMaxWidth().height(150.dp),
       yLabel = "m/s²",
-      xStart = if (h.size > 1) -(h.tMs.last() - h.tMs.first()) / 1000f else null,
-      xEnd = if (h.size > 1) 0f else null,
+      xStart = -LIVE_WINDOW_S,
+      xEnd = 0f,
+      t = h.relTimes(),
       minSpan = 0.5f,
     )
     Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -261,6 +262,9 @@ private fun LightCard(state: StateFlow<EngineState>) {
     LineChart(
       series = listOf(history.lux),
       colors = listOf(ChartColors.Lux),
+      xStart = -LIVE_WINDOW_S,
+      xEnd = 0f,
+      t = history.relTimes(),
       modifier = Modifier.fillMaxWidth().height(80.dp),
       minSpan = 2f,
       includeZero = true,
@@ -336,6 +340,9 @@ private fun InfraCard(engine: SensorEngine, settings: AppSettings) {
     LineChart(
       series = listOf(history.infra),
       colors = listOf(ChartColors.Infra),
+      xStart = -LIVE_WINDOW_S,
+      xEnd = 0f,
+      t = history.relTimes(),
       modifier = Modifier.fillMaxWidth().height(100.dp),
       yLabel = if (i.calibrated) "Pa" else "FS",
       minSpan = if (i.calibrated) 0.01f else 1e-5f,
@@ -358,4 +365,14 @@ private fun PressureCard(state: StateFlow<EngineState>) {
       Text("hPa", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
   }
+}
+
+/** Konstantna x skala grafova uživo: zadnjih 10 s. */
+private const val LIVE_WINDOW_S = 10f
+
+/** Vrijeme uzoraka u sekundama relativno prema zadnjem uzorku (zadnji = 0, stariji < 0). */
+private fun hr.adip.senzori.sensor.History.relTimes(): FloatArray {
+  if (size == 0) return FloatArray(0)
+  val last = tMs[size - 1]
+  return FloatArray(size) { (tMs[it] - last) / 1000f }
 }
