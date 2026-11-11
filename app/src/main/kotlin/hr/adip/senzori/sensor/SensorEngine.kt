@@ -83,6 +83,7 @@ class SensorEngine(
   @Volatile private var mode = SessionMode.RECORD
   @Volatile private var sessionRows = 0L
   @Volatile private var recorder: CsvRecorder? = null
+  @Volatile private var wavTarget: java.io.File? = null
   private var recordingStartMs = 0L
   private var sessionId = ""
   private val uploadQueue = ArrayList<Sample>()
@@ -94,7 +95,10 @@ class SensorEngine(
         val old = settings
         settings = s
         val needsRestart = old.sampleRateHz != s.sampleRateHz || old.infraEnabled != s.infraEnabled ||
-          old.infraCalibrationPaPerFs != s.infraCalibrationPaPerFs
+          old.infraCalibrationPaPerFs != s.infraCalibrationPaPerFs ||
+          old.accelEnabled != s.accelEnabled || old.lightEnabled != s.lightEnabled ||
+          old.pressureEnabled != s.pressureEnabled || old.audioEnabled != s.audioEnabled ||
+          old.audioSampleRateHz != s.audioSampleRateHz
         if (needsRestart && _state.value.running && !active) restart()
       }
     }
@@ -130,9 +134,10 @@ class SensorEngine(
     val h = Handler(ht.looper)
     // Akcelerometar: barem 4× brže od zapisa (prosjek u intervalu), max koliko senzor da.
     val accPeriodUs = (1_000_000 / (rate * 4)).coerceAtLeast(accSensor?.minDelay ?: 0)
-    accSensor?.let { sm.registerListener(listener, it, accPeriodUs, h) }
-    lightSensor?.let { sm.registerListener(listener, it, SensorManager.SENSOR_DELAY_GAME, h) }
-    pressureSensor?.let { sm.registerListener(listener, it, SensorManager.SENSOR_DELAY_GAME, h) }
+    lux = null; pHpa = null
+    if (s.accelEnabled) accSensor?.let { sm.registerListener(listener, it, accPeriodUs, h) }
+    if (s.lightEnabled) lightSensor?.let { sm.registerListener(listener, it, SensorManager.SENSOR_DELAY_GAME, h) }
+    if (s.pressureEnabled) pressureSensor?.let { sm.registerListener(listener, it, SensorManager.SENSOR_DELAY_GAME, h) }
 
     startInfra()
     _state.update { it.copy(running = true, sampleRateHz = rate) }
@@ -160,11 +165,19 @@ class SensorEngine(
 
   private fun startInfra() {
     infra?.stop(); infra = null
-    if (!settings.infraEnabled) {
-      _state.update { it.copy(infra = InfraInfo(status = "Isključeno u postavkama")) }
+    val s = settings
+    if (!s.infraEnabled && !s.audioEnabled) {
+      _state.update { it.copy(infra = InfraInfo(status = "Isključeno u postavkama"), audio = AudioInfo(enabled = false)) }
       return
     }
-    infra = InfrasoundSource(context, runningRate, settings.infraCalibrationPaPerFs).also { it.start() }
+    infra = InfrasoundSource(
+      context, runningRate, s.infraCalibrationPaPerFs,
+      infraEnabled = s.infraEnabled,
+      preferredRate = if (s.audioEnabled) s.audioSampleRateHz else null,
+      audioEnabled = s.audioEnabled,
+    ).also { it.start() }
+    // ako se snima, nastavi zapisivati WAV u isti cilj
+    infra?.wavTarget = wavTarget
   }
 
   /** Pozvati nakon odobrene dozvole za mikrofon. */
@@ -181,9 +194,11 @@ class SensorEngine(
       val targetMono = t0Mono + n * periodNs
       val waitNs = targetMono - SystemClock.elapsedRealtimeNanos()
       if (waitNs > 0) delay(waitNs / 1_000_000) // ms rezolucija; vremenska oznaka je ionako idealna
-      val ax: Float; val ay: Float; val az: Float
+      var ax: Float; var ay: Float; var az: Float
       synchronized(lock) {
-        if (accN > 0) {
+        if (!settings.accelEnabled && accN == 0) {
+          ax = Float.NaN; ay = Float.NaN; az = Float.NaN
+        } else if (accN > 0) {
           ax = (accSum[0] / accN).toFloat(); ay = (accSum[1] / accN).toFloat(); az = (accSum[2] / accN).toFloat()
         } else { ax = accLast[0]; ay = accLast[1]; az = accLast[2] }
         accSum.fill(0.0); accN = 0
@@ -213,6 +228,7 @@ class SensorEngine(
         it.copy(
           latest = hist.last(), history = hist.snapshot(), gravity = g,
           infra = infra?.info ?: it.infra,
+          audio = infra?.audioInfo ?: AudioInfo(enabled = settings.audioEnabled, status = if (settings.audioEnabled) "Mikrofon nije pokrenut" else ""),
           recordedRows = if (isActive) sessionRows else it.recordedRows,
           upload = uploadInfo.copy(pendingRows = synchronized(uploadQueue) { uploadQueue.size }),
         )
@@ -260,7 +276,15 @@ class SensorEngine(
       "units" to "t_ms=unix ms; a=m/s^2; lux=lx; infra=" + (if (s.infraCalibrated) "Pa" else "rel. FS") + "; p_hpa=hPa",
       "infraSource" to (infra?.info?.status ?: "-"),
       "infraBand" to "0.5-${"%.1f".format(minOf(20.0, 0.4 * runningRate))} Hz",
+      "sensors" to listOfNotNull(
+        "accel".takeIf { s.accelEnabled }, "light".takeIf { s.lightEnabled },
+        "pressure".takeIf { s.pressureEnabled }, "infra".takeIf { s.infraEnabled }, "audio".takeIf { s.audioEnabled },
+      ).joinToString("+"),
     )
+    val wav = if (sessionMode.records && s.audioEnabled && infra != null) java.io.File(file.parentFile, file.nameWithoutExtension + ".wav") else null
+    if (wav != null) meta["audioFile"] = wav.name + " (PCM16 mono, ${s.audioSampleRateHz} Hz zatraženo)"
+    wavTarget = wav
+    infra?.wavTarget = wav
     synchronized(uploadQueue) { uploadQueue.clear() }
     uploadInfo = UploadInfo(enabled = sessionMode.streams)
     mode = sessionMode
@@ -283,6 +307,8 @@ class SensorEngine(
     active = false
     recorder?.close()
     recorder = null
+    wavTarget = null
+    infra?.wavTarget = null
     val job = uploadJob
     uploadJob = null
     val streamed = mode.streams

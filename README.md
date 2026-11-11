@@ -238,6 +238,15 @@ adb pull /sdcard/Android/data/hr.adip.senzori/files/zapisi/ .
 
 Zapisi se mogu i **dijeliti** iz aplikacije (e-mail, Drive…) preko `FileProvider`.
 
+### Snimanje zvuka (WAV)
+
+Kad je u postavkama uključeno **Snimanje zvuka (WAV)**, u načinima Snimanje i Oboje uz CSV nastaje i `adip_YYYYMMDD_HHMMSS.wav`, isto ime s drugim nastavkom.
+
+- **Format:** PCM 16 bit, mono, 16 / 44,1 / 48 kHz po izboru.
+- **Bez obrade:** zvuk dolazi iz istog `AudioRecord`-a kao infrazvuk, dakle izvor `UNPROCESSED` ili `MIC` s isključenim AGC/NS/AEC. Mikrofon se otvara samo jednom, a infrazvuk se računa iz istog signala.
+- **CSV:** u zaglavlje se upisuju `# audioFile=…` i `# sensors=…` (popis uključenih senzora).
+- **Bez slanja:** zvuk se ne šalje na server, jer bi bio prevelik za stream. WAV se dijeli iz aplikacije.
+
 ### Format
 
 ```csv
@@ -376,6 +385,8 @@ Navigacija je donja traka s četiri kartice. Ikona mjeseca u gornjoj traci uklju
   - stupčasti spektar 0–20 Hz i vremenski graf;
   - status izvora i gumb za dozvolu mikrofona.
 - **Barometar**, ako postoji.
+- **Mikrofon**, kad je uključeno snimanje zvuka: razina u dBFS, vršna razina i mjerač od −90 do 0 dBFS (zeleno / jantarno / crveno), uz oznaku "● snima se u WAV" dok se zvuk zapisuje.
+- Kartica isključenog senzora pokazuje samo "Isključeno u postavkama".
 - Izbor načina **Stream / Snimanje / Oboje** i gumb **Start/Stop** s trajanjem, brojem redova i statusom slanja.
 
 **Grafovi i prošle vrijednosti:**
@@ -396,6 +407,7 @@ Navigacija je donja traka s četiri kartice. Ikona mjeseca u gornjoj traci uklju
 
 - Popis CSV zapisa. Akcije za svaki zapis su otvori, podijeli, pošalji na server i obriši (uz potvrdu).
 - Detalj zapisa prikazuje grafove po kanalu, statistiku i metapodatke.
+- Zapis sa zvukom ima oznaku **WAV**. U detalju je kartica **Zvuk** s reprodukcijom, pomakom kroz snimku i dijeljenjem WAV datoteke. Brisanje zapisa briše i njegov WAV.
 - **Os x** ide od 0 do kraja zapisa i ista je za sve grafove. Dva prsta zumiraju, a vodoravno povlačenje pomiče prikaz kroz zapis.
 
 ### Postavke
@@ -423,7 +435,10 @@ Svijetla, tamna ili po sustavu (postavka). Paleta je tamnoplava "noćno nebo" s 
 | Postavka | Zadano | Opis |
 |---|---|---|
 | Frekvencija uzorkovanja | 50 Hz | 10 / 25 / 50 / 100 / 200 Hz; primjenjuje se pri sljedećem pokretanju |
+| Akcelerometar / Svjetlo / Barometar | uključeno | Isključen senzor se ne registrira, a stupac u CSV-u ostaje prazan |
 | Infrazvuk | uključeno | Mjerenje mikrofonom |
+| Snimanje zvuka (WAV) | isključeno | Uz CSV sprema i zvuk mikrofona (načini Snimanje i Oboje) |
+| Frekvencija zvuka | 16 kHz | 16 / 44,1 / 48 kHz; mono 16 bit ≈ 115 / 318 / 346 MB na sat |
 | Kalibracija infrazvuka | 0 (nekalibrirano) | Pa po jedinici punog raspona |
 | Tema | Sustav | Sustav / Svijetla / Tamna |
 | Drži ekran upaljen | uključeno | `FLAG_KEEP_SCREEN_ON` dok je aplikacija otvorena |
@@ -440,7 +455,7 @@ Postavke se spremaju u DataStore (`postavke.preferences_pb`).
 
 | Dozvola | Zašto |
 |---|---|
-| `RECORD_AUDIO` | Infrazvuk (traži se tek kad korisnik uključi infrazvuk) |
+| `RECORD_AUDIO` | Infrazvuk i snimanje zvuka |
 | `INTERNET`, `ACCESS_NETWORK_STATE` | Slanje na web servis |
 | `HIGH_SAMPLING_RATE_SENSORS` | Akcelerometar brži od 200 Hz na Androidu 12+ (za zapis od 100–200 Hz s usrednjavanjem) |
 | `FOREGROUND_SERVICE`, `…_MICROPHONE`, `…_DATA_SYNC` | Snimanje u pozadini |

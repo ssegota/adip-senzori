@@ -24,8 +24,15 @@ enum class SessionMode(val label: String, val records: Boolean, val streams: Boo
 data class AppSettings(
   /** Fiksna frekvencija uzorkovanja zapisa (Hz). */
   val sampleRateHz: Int = 50,
+  /** Uključivanje/isključivanje pojedinih senzora. */
+  val accelEnabled: Boolean = true,
+  val lightEnabled: Boolean = true,
+  val pressureEnabled: Boolean = true,
   /** Uključi mjerenje infrazvuka mikrofonom (traži dozvolu RECORD_AUDIO). */
   val infraEnabled: Boolean = true,
+  /** Snimanje zvuka mikrofona u WAV uz CSV (način Snimanje/Oboje). */
+  val audioEnabled: Boolean = false,
+  val audioSampleRateHz: Int = 16000,
   /** Kalibracija: Pa po jedinici punog raspona (1.0 = nekalibrirano, relativne jedinice). */
   val infraCalibrationPaPerFs: Float = 0f,
   val themeMode: ThemeMode = ThemeMode.SYSTEM,
@@ -44,6 +51,7 @@ data class AppSettings(
 
   companion object {
     val SAMPLE_RATES = listOf(10, 25, 50, 100, 200)
+    val AUDIO_RATES = listOf(16000, 44100, 48000)
   }
 }
 
@@ -53,6 +61,11 @@ class SettingsRepository(private val context: Context) {
   private object K {
     val rate = intPreferencesKey("sample_rate")
     val infra = booleanPreferencesKey("infra_enabled")
+    val acc = booleanPreferencesKey("accel_enabled")
+    val light = booleanPreferencesKey("light_enabled")
+    val press = booleanPreferencesKey("pressure_enabled")
+    val audio = booleanPreferencesKey("audio_enabled")
+    val audioRate = intPreferencesKey("audio_rate")
     val infraCal = floatPreferencesKey("infra_cal")
     val theme = stringPreferencesKey("theme")
     val keepOn = booleanPreferencesKey("keep_screen_on")
@@ -71,6 +84,11 @@ class SettingsRepository(private val context: Context) {
       val s = transform(p.toSettings())
       p[K.rate] = s.sampleRateHz
       p[K.infra] = s.infraEnabled
+      p[K.acc] = s.accelEnabled
+      p[K.light] = s.lightEnabled
+      p[K.press] = s.pressureEnabled
+      p[K.audio] = s.audioEnabled
+      p[K.audioRate] = s.audioSampleRateHz
       p[K.infraCal] = s.infraCalibrationPaPerFs
       p[K.theme] = s.themeMode.name
       p[K.keepOn] = s.keepScreenOn
@@ -88,6 +106,11 @@ class SettingsRepository(private val context: Context) {
     return AppSettings(
       sampleRateHz = this[K.rate] ?: d.sampleRateHz,
       infraEnabled = this[K.infra] ?: d.infraEnabled,
+      accelEnabled = this[K.acc] ?: d.accelEnabled,
+      lightEnabled = this[K.light] ?: d.lightEnabled,
+      pressureEnabled = this[K.press] ?: d.pressureEnabled,
+      audioEnabled = this[K.audio] ?: d.audioEnabled,
+      audioSampleRateHz = this[K.audioRate] ?: d.audioSampleRateHz,
       infraCalibrationPaPerFs = this[K.infraCal] ?: d.infraCalibrationPaPerFs,
       themeMode = runCatching { ThemeMode.valueOf(this[K.theme] ?: "") }.getOrDefault(d.themeMode),
       keepScreenOn = this[K.keepOn] ?: d.keepScreenOn,

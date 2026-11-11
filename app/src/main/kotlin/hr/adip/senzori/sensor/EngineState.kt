@@ -50,6 +50,21 @@ data class InfraInfo(
   val peakHz: Float = 0f,
 )
 
+data class AudioInfo(
+  /** audioEnabled u postavkama */
+  val enabled: Boolean = false,
+  /** mikrofon radi */
+  val available: Boolean = false,
+  /** RMS razina zadnjih ~250 ms, dBFS */
+  val levelDb: Float = Float.NEGATIVE_INFINITY,
+  /** vršna razina, dBFS */
+  val peakDb: Float = Float.NEGATIVE_INFINITY,
+  val sampleRateHz: Int = 0,
+  /** WAV se upravo zapisuje */
+  val recording: Boolean = false,
+  val status: String = "",
+)
+
 data class UploadInfo(
   val enabled: Boolean = false,
   val sentRows: Long = 0,
@@ -76,4 +91,5 @@ data class EngineState(
   val recordedRows: Long = 0,
   val recordingStartedMs: Long = 0,
   val upload: UploadInfo = UploadInfo(),
+  val audio: AudioInfo = AudioInfo(),
 )

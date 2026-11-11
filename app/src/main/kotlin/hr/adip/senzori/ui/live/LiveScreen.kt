@@ -7,7 +7,11 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -107,10 +111,11 @@ fun LiveScreen(engine: SensorEngine, settings: AppSettings, contentPadding: Padd
   ) {
     RecordPanel(engine, settings)
     PastBar(view)
-    AccelCard(state, view)
-    LightCard(state, view)
+    AccelCard(state, settings, view)
+    LightCard(state, settings, view)
     InfraCard(engine, settings, view)
-    PressureCard(state)
+    if (settings.audioEnabled) MicCard(engine)
+    PressureCard(state, settings)
     Spacer(Modifier.height(8.dp))
   }
 }
@@ -267,7 +272,8 @@ private fun UploadLine(u: hr.adip.senzori.sensor.UploadInfo, color: Color) {
 // ---------------------------------------------------------------- akceleracija
 
 @Composable
-private fun AccelCard(state: StateFlow<EngineState>, view: LiveView) {
+private fun AccelCard(state: StateFlow<EngineState>, settings: AppSettings, view: LiveView) {
+  if (!settings.accelEnabled) { DisabledCard("Akceleracija", Icons.Outlined.Vibration); return }
   SensorCard("Akceleracija", Icons.Outlined.Vibration) {
     val latest by state.select { it.latest }
     val s = latest
@@ -308,8 +314,9 @@ private fun AxisValue(label: String, v: Float?, color: Color) {
 // ---------------------------------------------------------------- svjetlo
 
 @Composable
-private fun LightCard(state: StateFlow<EngineState>, view: LiveView) {
+private fun LightCard(state: StateFlow<EngineState>, settings: AppSettings, view: LiveView) {
   val hasLight by state.select { it.hasLight }
+  if (hasLight && !settings.lightEnabled) { DisabledCard("Luksmetar", Icons.Outlined.LightMode); return }
   SensorCard("Luksmetar", Icons.Outlined.LightMode) {
     if (!hasLight) {
       Text("Nije dostupno – uređaj nema senzor svjetla.", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -340,35 +347,18 @@ private fun LightCard(state: StateFlow<EngineState>, view: LiveView) {
 
 @Composable
 private fun InfraCard(engine: SensorEngine, settings: AppSettings, view: LiveView) {
-  val context = LocalContext.current
+  if (!settings.infraEnabled) { DisabledCard("Infrazvuk", Icons.Outlined.GraphicEq); return }
   val state = engine.state
-  var granted by remember {
-    mutableStateOf(ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED)
-  }
-  LifecycleResumeEffect(Unit) {
-    granted = ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
-    onPauseOrDispose { }
-  }
-  val launcher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { ok ->
-    granted = ok
-    if (ok) engine.restartInfra()
-  }
+  val mic = rememberMicPermission(engine)
+  val granted = mic.granted
   val info by state.select { it.infra }
   SensorCard("Infrazvuk", Icons.Outlined.GraphicEq) {
-    if (!settings.infraEnabled) {
-      Text("Isključeno u postavkama.", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-      return@SensorCard
-    }
     if (!granted) {
       Text(
         "Za mjerenje infrazvuka potreban je pristup mikrofonu. Zvuk se ne snima niti šalje – koristi se samo niskofrekventni dio signala.",
         style = MaterialTheme.typography.bodyMedium,
       )
-      FilledTonalButton(onClick = { launcher.launch(Manifest.permission.RECORD_AUDIO) }) {
-        Icon(Icons.Outlined.Mic, null)
-        Spacer(Modifier.width(6.dp))
-        Text("Dopusti mikrofon")
-      }
+      MicPermissionButton(mic)
       return@SensorCard
     }
     val i = info
@@ -416,12 +406,146 @@ private fun InfraCard(engine: SensorEngine, settings: AppSettings, view: LiveVie
   }
 }
 
+// ---------------------------------------------------------------- mikrofon (zvuk)
+
+@Stable
+private class MicPermission(private val state: androidx.compose.runtime.MutableState<Boolean>, val request: () -> Unit) {
+  val granted: Boolean get() = state.value
+}
+
+/** Stanje dozvole RECORD_AUDIO; nakon odobrenja ponovno pokreće mikrofon (infrazvuk i razina zvuka). */
+@Composable
+private fun rememberMicPermission(engine: SensorEngine): MicPermission {
+  val context = LocalContext.current
+  fun check() = ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+  val granted = remember { mutableStateOf(check()) }
+  val launcher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { ok ->
+    granted.value = ok
+    if (ok) engine.restartInfra()
+  }
+  LifecycleResumeEffect(Unit) {
+    granted.value = check()
+    onPauseOrDispose { }
+  }
+  return remember(launcher) { MicPermission(granted) { launcher.launch(Manifest.permission.RECORD_AUDIO) } }
+}
+
+@Composable
+private fun MicPermissionButton(mic: MicPermission) {
+  FilledTonalButton(onClick = mic.request) {
+    Icon(Icons.Outlined.Mic, null)
+    Spacer(Modifier.width(6.dp))
+    Text("Dopusti mikrofon")
+  }
+}
+
+private const val METER_MIN_DB = -90f
+private const val METER_AMBER_DB = -18f
+private const val METER_RED_DB = -6f
+private val MeterGreen = Color(0xFF30A46C)
+private val MeterAmber = Color(0xFFF5A524)
+private val MeterRed = Color(0xFFE5484D)
+
+@Composable
+private fun MicCard(engine: SensorEngine) {
+  val mic = rememberMicPermission(engine)
+  val audio by engine.state.select { it.audio }
+  val recording = audio.recording
+  SensorCard(
+    "Mikrofon",
+    Icons.Outlined.Mic,
+    trailing = if (recording) {
+      { Text("● snima se u WAV", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.error) }
+    } else null,
+  ) {
+    if (!mic.granted) {
+      Text(
+        "Za razinu i snimanje zvuka potreban je pristup mikrofonu. Zvuk se sprema samo lokalno (WAV) i ne šalje se na server.",
+        style = MaterialTheme.typography.bodyMedium,
+      )
+      MicPermissionButton(mic)
+      return@SensorCard
+    }
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.Bottom) {
+      Row(verticalAlignment = Alignment.Bottom) {
+        Text(if (audio.levelDb.isFinite()) fmt(audio.levelDb, 1) else "—", style = NumberStyles.big)
+        Spacer(Modifier.width(6.dp))
+        Text("dBFS", style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(bottom = 6.dp))
+      }
+      Column(horizontalAlignment = Alignment.End) {
+        Text("vrh ${if (audio.peakDb.isFinite()) fmt(audio.peakDb, 1) else "—"} dBFS", style = NumberStyles.small)
+        Text(
+          if (audio.sampleRateHz > 0) "${fmt(audio.sampleRateHz / 1000f, if (audio.sampleRateHz % 1000 == 0) 0 else 1)} kHz" else "— kHz",
+          style = NumberStyles.small,
+        )
+      }
+    }
+    LevelMeter(audio.levelDb, audio.peakDb, Modifier.fillMaxWidth().height(18.dp))
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+      for (l in listOf("−90", "−60", "−30", "0")) {
+        Text(l, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+      }
+    }
+    val status = when {
+      audio.status.isNotBlank() -> audio.status
+      !audio.available -> "mikrofon nije dostupan"
+      recording -> "zvuk se zapisuje uz CSV"
+      else -> "WAV se zapisuje samo tijekom snimanja (Snimanje/Oboje)"
+    }
+    Text(status, style = NumberStyles.mono, color = if (audio.available) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.error)
+  }
+}
+
+/** Vodoravni mjerač razine −90…0 dBFS sa zonama (zelena/jantar/crvena) i oznakom vrha. */
+@Composable
+private fun LevelMeter(levelDb: Float, peakDb: Float, modifier: Modifier) {
+  val track = MaterialTheme.colorScheme.surfaceContainerHighest
+  val peakColor = MaterialTheme.colorScheme.onSurface
+  Canvas(modifier) {
+    val w = size.width
+    val h = size.height
+    fun x(db: Float) = ((db - METER_MIN_DB) / -METER_MIN_DB).coerceIn(0f, 1f) * w
+    val rad = CornerRadius(h / 4f, h / 4f)
+    drawRoundRect(track, size = size, cornerRadius = rad)
+    val xa = x(METER_AMBER_DB)
+    val xr = x(METER_RED_DB)
+    // prigušene zone u pozadini
+    drawRect(MeterGreen.copy(alpha = 0.15f), Offset(0f, 0f), Size(xa, h))
+    drawRect(MeterAmber.copy(alpha = 0.18f), Offset(xa, 0f), Size(xr - xa, h))
+    drawRect(MeterRed.copy(alpha = 0.18f), Offset(xr, 0f), Size(w - xr, h))
+    if (levelDb.isFinite()) {
+      val xl = x(levelDb)
+      drawRect(MeterGreen, Offset(0f, 0f), Size(minOf(xl, xa), h))
+      if (xl > xa) drawRect(MeterAmber, Offset(xa, 0f), Size(minOf(xl, xr) - xa, h))
+      if (xl > xr) drawRect(MeterRed, Offset(xr, 0f), Size(xl - xr, h))
+    }
+    if (peakDb.isFinite()) {
+      val xp = x(peakDb).coerceIn(1.5.dp.toPx(), w - 1.5.dp.toPx())
+      drawLine(peakColor, Offset(xp, 0f), Offset(xp, h), 3.dp.toPx())
+    }
+  }
+}
+
+// ---------------------------------------------------------------- isključeno
+
+@Composable
+private fun DisabledCard(title: String, icon: androidx.compose.ui.graphics.vector.ImageVector) {
+  SensorCard(
+    title,
+    icon,
+    trailing = {
+      Text("Isključeno u postavkama", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    },
+  ) {}
+}
+
 // ---------------------------------------------------------------- tlak
 
 @Composable
-private fun PressureCard(state: StateFlow<EngineState>) {
+private fun PressureCard(state: StateFlow<EngineState>, settings: AppSettings) {
   val has by state.select { it.hasPressure }
   if (!has) return
+  if (!settings.pressureEnabled) { DisabledCard("Barometar", Icons.Outlined.Compress); return }
   val p by state.select { it.latest?.pHpa }
   SensorCard("Barometar", Icons.Outlined.Compress) {
     Row(verticalAlignment = Alignment.Bottom) {

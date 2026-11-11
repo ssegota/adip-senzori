@@ -21,6 +21,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.CloudUpload
 import androidx.compose.material.icons.outlined.DeleteOutline
 import androidx.compose.material.icons.outlined.FolderOpen
+import androidx.compose.material.icons.outlined.Mic
 import androidx.compose.material.icons.outlined.Share
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CardDefaults
@@ -159,7 +160,7 @@ fun RecordingsScreen(
       onDismissRequest = { confirmDelete = null },
       icon = { Icon(Icons.Outlined.DeleteOutline, null) },
       title = { Text("Obrisati zapis?") },
-      text = { Text("${info.name} (${formatBytes(info.sizeBytes)}) bit će trajno obrisan s uređaja.") },
+      text = { Text("${info.name} (${formatBytes(info.sizeBytes + (info.audioFile?.length() ?: 0L))})${if (info.audioFile != null) " i pripadni WAV" else ""} bit će trajno obrisan s uređaja.") },
       confirmButton = {
         TextButton(onClick = {
           confirmDelete = null
@@ -217,11 +218,18 @@ private fun RecordingCard(
         }
       }
       Text(dateFmt.format(Date(info.startedAtMs)), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-      Text(
-        "${formatDuration(info.durationS.toLong())} · ${info.rows} redaka · ${info.sampleRateHz} Hz · ${formatBytes(info.sizeBytes)}",
-        style = NumberStyles.small,
-        modifier = Modifier.padding(top = 4.dp),
-      )
+      Row(Modifier.padding(top = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+        Text(
+          "${formatDuration(info.durationS.toLong())} · ${info.rows} redaka · ${info.sampleRateHz} Hz · ${formatBytes(info.sizeBytes)}",
+          style = NumberStyles.small,
+          modifier = Modifier.weight(1f, fill = false),
+        )
+        if (info.audioFile != null) {
+          Spacer(Modifier.width(8.dp))
+          Icon(Icons.Outlined.Mic, "Zvuk", Modifier.size(14.dp), tint = MaterialTheme.colorScheme.primary)
+          Text("WAV", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
+        }
+      }
       Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End, verticalAlignment = Alignment.CenterVertically) {
         IconButton(onClick = onShare) { Icon(Icons.Outlined.Share, "Podijeli") }
         if (uploading) {

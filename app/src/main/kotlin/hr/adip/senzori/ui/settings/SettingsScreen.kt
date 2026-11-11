@@ -29,6 +29,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ElevatedCard
 import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -56,6 +57,8 @@ import hr.adip.senzori.BuildConfig
 import hr.adip.senzori.data.AppSettings
 import hr.adip.senzori.data.SettingsRepository
 import hr.adip.senzori.data.ThemeMode
+import hr.adip.senzori.sensor.SensorEngine
+import hr.adip.senzori.ui.components.select
 import hr.adip.senzori.upload.AdipClient
 import kotlinx.coroutines.launch
 
@@ -63,6 +66,7 @@ import kotlinx.coroutines.launch
 fun SettingsScreen(
   repo: SettingsRepository,
   client: AdipClient,
+  engine: SensorEngine,
   settings: AppSettings,
   contentPadding: PaddingValues,
 ) {
@@ -93,17 +97,9 @@ fun SettingsScreen(
         }
       }
       Hint("Hz. Primjenjuje se od sljedećeg pokretanja mjerenja/snimanja.")
-      SwitchRow("Infrazvuk (mikrofon)", "Niskofrekventni dio signala mikrofona, 0,5–20 Hz", settings.infraEnabled) { v ->
-        update { it.copy(infraEnabled = v) }
-      }
-      NumberField(
-        label = "Kalibracija infrazvuka (Pa / FS)",
-        value = settings.infraCalibrationPaPerFs,
-        onValue = { v -> update { it.copy(infraCalibrationPaPerFs = v.coerceAtLeast(0f)) } },
-        decimal = true,
-      )
-      Hint(if (settings.infraCalibrated) "Kalibrirano – razina se prikazuje u dB SPL." else "0 = nekalibrirano – razina se prikazuje relativno (dBFS).")
     }
+
+    SensorsSection(settings, engine, ::update)
 
     Section("Prikaz") {
       Label("Tema")
@@ -168,6 +164,76 @@ fun SettingsScreen(
 }
 
 @Composable
+private fun SensorsSection(settings: AppSettings, engine: SensorEngine, update: ((AppSettings) -> AppSettings) -> Unit) {
+  val hasLight by engine.state.select { it.hasLight }
+  val hasPressure by engine.state.select { it.hasPressure }
+  val running by engine.state.select { it.recording }
+  Section("Senzori") {
+    SwitchRow("Akcelerometar", "Ubrzanje x, y, z (m/s²); potrebno i za libelu", settings.accelEnabled) { v ->
+      update { it.copy(accelEnabled = v) }
+    }
+    SwitchRow(
+      "Svjetlo (luksmetar)",
+      if (hasLight) "Osvijetljenost (lx)" else "Nije dostupno na ovom uređaju",
+      settings.lightEnabled && hasLight,
+      enabled = hasLight,
+    ) { v -> update { it.copy(lightEnabled = v) } }
+    SwitchRow(
+      "Barometar",
+      if (hasPressure) "Tlak zraka (hPa)" else "Nije dostupno na ovom uređaju",
+      settings.pressureEnabled && hasPressure,
+      enabled = hasPressure,
+    ) { v -> update { it.copy(pressureEnabled = v) } }
+
+    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+    SwitchRow("Infrazvuk (mikrofon)", "Niskofrekventni dio signala mikrofona, 0,5–20 Hz", settings.infraEnabled) { v ->
+      update { it.copy(infraEnabled = v) }
+    }
+    if (settings.infraEnabled) {
+      NumberField(
+        label = "Kalibracija infrazvuka (Pa / FS)",
+        value = settings.infraCalibrationPaPerFs,
+        onValue = { v -> update { it.copy(infraCalibrationPaPerFs = v.coerceAtLeast(0f)) } },
+        decimal = true,
+      )
+      Hint(if (settings.infraCalibrated) "Kalibrirano – razina se prikazuje u dB SPL." else "0 = nekalibrirano – razina se prikazuje relativno (dBFS).")
+    }
+
+    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+    SwitchRow(
+      "Snimanje zvuka (WAV)",
+      "Uz CSV sprema i zvuk mikrofona (samo u načinu Snimanje/Oboje; ne šalje se na server)",
+      settings.audioEnabled,
+    ) { v -> update { it.copy(audioEnabled = v) } }
+    if (settings.audioEnabled) {
+      Label("Frekvencija uzorkovanja zvuka")
+      val rates = AppSettings.AUDIO_RATES
+      SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
+        rates.forEachIndexed { i, r ->
+          SegmentedButton(
+            selected = settings.audioSampleRateHz == r,
+            onClick = { update { it.copy(audioSampleRateHz = r) } },
+            shape = SegmentedButtonDefaults.itemShape(i, rates.size),
+            icon = {},
+          ) { Text(audioRateLabel(r)) }
+        }
+      }
+      Hint("Veličina WAV-a (mono, 16 bit): ${rates.joinToString(", ") { "${audioRateLabel(it)} ≈ ${audioMbPerHour(it)} MB/h" }}.")
+    }
+    Hint(
+      if (running) "Sesija je u tijeku – promjene senzora primjenjuju se pri sljedećem pokretanju."
+      else "Promjene se primjenjuju pri sljedećem pokretanju mjerenja/snimanja, ne tijekom aktivne sesije.",
+    )
+  }
+}
+
+private fun audioRateLabel(hz: Int): String =
+  if (hz % 1000 == 0) "${hz / 1000} kHz" else String.format(hr.adip.senzori.ui.components.HR, "%.1f kHz", hz / 1000.0)
+
+/** Mono 16-bit PCM: 2 B po uzorku. */
+private fun audioMbPerHour(hz: Int): Long = Math.round(hz * 2.0 * 3600 / 1_000_000)
+
+@Composable
 private fun Section(title: String, content: @Composable ColumnScope.() -> Unit) {
   Text(title, style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.primary, modifier = Modifier.padding(start = 4.dp, top = 8.dp))
   ElevatedCard(
@@ -185,13 +251,17 @@ private fun Label(text: String) = Text(text, style = MaterialTheme.typography.bo
 private fun Hint(text: String) = Text(text, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
 
 @Composable
-private fun SwitchRow(title: String, subtitle: String?, checked: Boolean, onChange: (Boolean) -> Unit) {
+private fun SwitchRow(title: String, subtitle: String?, checked: Boolean, enabled: Boolean = true, onChange: (Boolean) -> Unit) {
   Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-    Column(Modifier.weight(1f)) {
-      Text(title, style = MaterialTheme.typography.bodyLarge)
+    Column(Modifier.weight(1f).padding(end = 12.dp)) {
+      Text(
+        title,
+        style = MaterialTheme.typography.bodyLarge,
+        color = if (enabled) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f),
+      )
       if (subtitle != null) Hint(subtitle)
     }
-    Switch(checked = checked, onCheckedChange = onChange)
+    Switch(checked = checked, onCheckedChange = onChange, enabled = enabled)
   }
 }
 

@@ -92,7 +92,7 @@ fun AppRoot(app: AdipApp, settings: AppSettings) {
           Tab.LIVE -> LiveScreen(app.engine, settings, padding)
           Tab.LEVEL -> LevelScreen(app.engine, app.settings, settings, padding)
           Tab.RECORDINGS -> RecordingsScreen(app.recordings, app.client, app.engine, settings, snackbar, padding)
-          Tab.SETTINGS -> SettingsScreen(app.settings, app.client, settings, padding)
+          Tab.SETTINGS -> SettingsScreen(app.settings, app.client, app.engine, settings, padding)
         }
       }
     }

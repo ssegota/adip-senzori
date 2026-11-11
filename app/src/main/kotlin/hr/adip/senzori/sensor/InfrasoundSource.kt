@@ -35,9 +35,20 @@ class InfrasoundSource(
   private val context: Context,
   private val recordRateHz: Int,
   private val paPerFs: Float,
+  /** Računaj infrazvuk (inače se mikrofon koristi samo za razinu zvuka / WAV). */
+  private val infraEnabled: Boolean = true,
+  /** Željena frekvencija mikrofona (Hz); null = 8 kHz (dovoljno za infrazvuk). */
+  private val preferredRate: Int? = null,
+  private val audioEnabled: Boolean = false,
 ) {
   @Volatile var latest: Float = 0f; private set
   @Volatile var info: InfraInfo = InfraInfo(); private set
+  @Volatile var audioInfo: AudioInfo = AudioInfo(enabled = audioEnabled); private set
+
+  /** Ciljna WAV datoteka: dok je postavljena, sirovi PCM16 iz mikrofona zapisuje se u nju (postavlja engine). */
+  @Volatile var wavTarget: java.io.File? = null
+  private var wav: hr.adip.senzori.recording.WavWriter? = null
+  @Volatile var sampleRate: Int = 0; private set
 
   private var thread: Thread? = null
   @Volatile private var running = false
@@ -56,10 +67,11 @@ class InfrasoundSource(
     if (running) return
     if (!hasPermission()) {
       info = InfraInfo(available = false, status = "Potrebna dozvola za mikrofon")
+      audioInfo = AudioInfo(enabled = audioEnabled, status = "Potrebna dozvola za mikrofon")
       return
     }
     running = true
-    thread = Thread(::loop, "infrazvuk").apply { priority = Thread.MAX_PRIORITY; start() }
+    thread = Thread(::loop, "mikrofon").apply { priority = Thread.MAX_PRIORITY; start() }
   }
 
   fun stop() {
@@ -78,7 +90,8 @@ class InfrasoundSource(
   @SuppressLint("MissingPermission")
   private fun openRecord(): Triple<AudioRecord, Int, String>? {
     val (src, srcName) = chooseSource()
-    for (rate in intArrayOf(8000, 16000, 48000, 44100)) {
+    val rates = (listOfNotNull(preferredRate) + listOf(8000, 16000, 48000, 44100)).distinct()
+    for (rate in rates) {
       val minBuf = AudioRecord.getMinBufferSize(rate, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
       if (minBuf <= 0) continue
       val rec = try {
@@ -112,10 +125,12 @@ class InfrasoundSource(
     val opened = try { openRecord() } catch (e: SecurityException) { null }
     if (opened == null) {
       info = InfraInfo(available = false, status = "Mikrofon nije dostupan")
+      audioInfo = AudioInfo(enabled = audioEnabled, status = "Mikrofon nije dostupan")
       running = false
       return
     }
     val (rec, fs, srcName) = opened
+    sampleRate = fs
     // Stupanj 1: fs -> ~800 Hz, stupanj 2: -> ~100 Hz
     val d1 = max(1, (fs / 800.0).roundToInt())
     val r1 = fs.toDouble() / d1
@@ -129,16 +144,47 @@ class InfrasoundSource(
     val scale = if (paPerFs > 0f) paPerFs.toDouble() else 1.0
     val calibrated = paPerFs > 0f
     val status = "$srcName @ $fs Hz → ${"%.0f".format(outRate)} Hz, pojas 0.5–${"%.1f".format(bandHigh)} Hz"
+    val audioStatus = "$srcName @ $fs Hz, mono 16-bit"
+    var sumSq = 0.0
+    var peakAbs = 0
+    var levelN = 0
 
     val buf = ShortArray(fs / 20)
     var warmup = (outRate * 3).toInt() // pusti filtre da se smire
     var lastInfo = 0L
     try {
       rec.startRecording()
-      info = InfraInfo(available = true, status = status, calibrated = calibrated)
+      info = if (infraEnabled) InfraInfo(available = true, status = status, calibrated = calibrated)
+        else InfraInfo(available = false, status = "Isključeno u postavkama")
+      audioInfo = AudioInfo(enabled = audioEnabled, available = true, sampleRateHz = fs, status = audioStatus)
       while (running) {
         val n = rec.read(buf, 0, buf.size)
         if (n <= 0) { if (n < 0) break else continue }
+        val target = wavTarget
+        if (target != null && wav?.file != target) {
+          wav?.close()
+          wav = runCatching { hr.adip.senzori.recording.WavWriter(target, fs) }.getOrNull()
+        } else if (target == null && wav != null) {
+          wav?.close(); wav = null
+        }
+        val w = wav
+        if (w != null) runCatching { w.write(buf, n) }
+        for (i in 0 until n) {
+          val v = buf[i].toInt()
+          sumSq += v.toDouble() * v
+          val a = if (v < 0) -v else v
+          if (a > peakAbs) peakAbs = a
+        }
+        levelN += n
+        if (!infraEnabled) {
+          val now = System.currentTimeMillis()
+          if (now - lastInfo > 250) {
+            lastInfo = now
+            audioInfo = levelInfo(sumSq, peakAbs, levelN, fs, audioStatus, w != null)
+            sumSq = 0.0; peakAbs = 0; levelN = 0
+          }
+          continue
+        }
         for (i in 0 until n) {
           val a = st1.push(buf[i] / 32768.0)
           if (a.isNaN()) continue
@@ -158,6 +204,8 @@ class InfrasoundSource(
         if (now - lastInfo > 250) {
           lastInfo = now
           info = analyse(status, calibrated)
+          audioInfo = levelInfo(sumSq, peakAbs, levelN, fs, audioStatus, w != null)
+          sumSq = 0.0; peakAbs = 0; levelN = 0
         }
       }
     } catch (e: Exception) {
@@ -166,9 +214,21 @@ class InfrasoundSource(
     } finally {
       runCatching { rec.stop() }
       rec.release()
+      wav?.close(); wav = null
       effects.forEach { runCatching { it.release() } }
       effects.clear()
     }
+  }
+
+  private fun levelInfo(sumSq: Double, peakAbs: Int, n: Int, fs: Int, status: String, recording: Boolean): AudioInfo {
+    val rms = if (n > 0) sqrt(sumSq / n) / 32768.0 else 0.0
+    val pk = peakAbs / 32768.0
+    return AudioInfo(
+      enabled = audioEnabled, available = true,
+      levelDb = if (rms > 0) (20 * log10(rms)).toFloat() else Float.NEGATIVE_INFINITY,
+      peakDb = if (pk > 0) (20 * log10(pk)).toFloat() else Float.NEGATIVE_INFINITY,
+      sampleRateHz = fs, recording = recording, status = status,
+    )
   }
 
   private fun analyse(status: String, calibrated: Boolean): InfraInfo {

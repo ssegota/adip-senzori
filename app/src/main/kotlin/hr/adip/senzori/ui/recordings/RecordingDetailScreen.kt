@@ -1,6 +1,19 @@
 package hr.adip.senzori.ui.recordings
 
+import android.content.ActivityNotFoundException
+import android.content.Intent
+import android.media.MediaPlayer
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.material.icons.filled.Pause
+import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.outlined.Mic
+import androidx.compose.material.icons.outlined.Share
+import androidx.compose.material3.FilledTonalIconButton
+import androidx.compose.material3.Slider
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.ui.platform.LocalContext
+import kotlinx.coroutines.delay
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -93,13 +106,13 @@ fun RecordingDetailScreen(repo: RecordingRepository, file: File, contentPadding:
     when {
       error != null -> Text("Greška pri čitanju: $error", color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(16.dp))
       d == null -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { CircularProgressIndicator() }
-      else -> DetailContent(d, window)
+      else -> DetailContent(d, window, repo)
     }
   }
 }
 
 @Composable
-private fun DetailContent(d: RecordingData, window: androidx.compose.runtime.MutableState<ClosedFloatingPointRange<Float>>) {
+private fun DetailContent(d: RecordingData, window: androidx.compose.runtime.MutableState<ClosedFloatingPointRange<Float>>, repo: RecordingRepository) {
   val durS = if (d.t.size > 1) (d.t.last() - d.t.first()) / 1000f else d.info.durationS.toFloat()
   val relT = remember(d) { if (d.t.isEmpty()) FloatArray(0) else FloatArray(d.t.size) { (d.t[it] - d.t.first()) / 1000f } }
   val infraUnit = d.info.meta["units"]?.let { if (it.contains("infra=Pa")) "Pa" else "FS" } ?: ""
@@ -124,6 +137,8 @@ private fun DetailContent(d: RecordingData, window: androidx.compose.runtime.Mut
       color = MaterialTheme.colorScheme.onSurfaceVariant,
     )
     Text("Zum: dva prsta · pomak: vodoravni potez", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.outline)
+
+    d.info.audioFile?.let { wav -> AudioCard(wav, repo) }
 
     for (g in groups) {
       SensorCard(g.title, g.icon) {
@@ -168,5 +183,95 @@ private fun DetailContent(d: RecordingData, window: androidx.compose.runtime.Mut
       color = MaterialTheme.colorScheme.outline,
     )
     Spacer(Modifier.height(16.dp))
+  }
+}
+
+/** Reprodukcija pripadnog WAV-a (MediaPlayer se oslobađa pri izlasku s ekrana). */
+@Composable
+private fun AudioCard(wav: File, repo: RecordingRepository) {
+  val context = LocalContext.current
+  var player by remember(wav) { mutableStateOf<MediaPlayer?>(null) }
+  var error by remember(wav) { mutableStateOf<String?>(null) }
+  var playing by remember(wav) { mutableStateOf(false) }
+  var posMs by remember(wav) { mutableIntStateOf(0) }
+  var durMs by remember(wav) { mutableIntStateOf(0) }
+  var dragging by remember(wav) { mutableStateOf<Float?>(null) }
+
+  DisposableEffect(wav) {
+    val mp = MediaPlayer()
+    try {
+      mp.setDataSource(wav.absolutePath)
+      mp.prepare()
+      mp.setOnCompletionListener { playing = false; posMs = 0; it.seekTo(0) }
+      durMs = mp.duration.coerceAtLeast(0)
+      player = mp
+    } catch (e: Exception) {
+      error = e.message ?: e.javaClass.simpleName
+      mp.release()
+    }
+    onDispose {
+      player = null
+      runCatching { mp.release() }
+    }
+  }
+  LaunchedEffect(playing, player) {
+    val mp = player ?: return@LaunchedEffect
+    while (playing) {
+      posMs = runCatching { mp.currentPosition }.getOrDefault(posMs)
+      delay(200)
+    }
+  }
+
+  SensorCard(
+    "Zvuk",
+    Icons.Outlined.Mic,
+    trailing = {
+      IconButton(onClick = {
+        try {
+          context.startActivity(Intent.createChooser(repo.shareIntent(wav), "Podijeli zvuk").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        } catch (_: ActivityNotFoundException) { }
+      }) { Icon(Icons.Outlined.Share, "Podijeli WAV") }
+    },
+  ) {
+    val err = error
+    if (err != null) {
+      Text("Reprodukcija nije moguća: $err", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+      return@SensorCard
+    }
+    Row(verticalAlignment = Alignment.CenterVertically) {
+      FilledTonalIconButton(
+        enabled = player != null,
+        onClick = {
+          val mp = player ?: return@FilledTonalIconButton
+          if (playing) { mp.pause(); playing = false } else { mp.start(); playing = true }
+        },
+      ) {
+        Icon(if (playing) Icons.Filled.Pause else Icons.Filled.PlayArrow, if (playing) "Pauza" else "Reproduciraj")
+      }
+      Spacer(Modifier.width(8.dp))
+      Slider(
+        value = dragging ?: if (durMs > 0) posMs.toFloat() / durMs else 0f,
+        onValueChange = { dragging = it },
+        onValueChangeFinished = {
+          val f = dragging
+          dragging = null
+          if (f != null && durMs > 0) {
+            val target = (f * durMs).toInt()
+            player?.seekTo(target)
+            posMs = target
+          }
+        },
+        enabled = player != null && durMs > 0,
+        modifier = Modifier.weight(1f),
+      )
+    }
+    val shown = dragging?.let { (it * durMs).toLong() } ?: posMs.toLong()
+    Text(
+      "${formatDuration(shown / 1000)} / ${formatDuration(durMs / 1000L)} · ${formatBytes(wav.length())} · ${wav.name}",
+      style = NumberStyles.small,
+      color = MaterialTheme.colorScheme.onSurfaceVariant,
+      maxLines = 1,
+      overflow = TextOverflow.Ellipsis,
+    )
   }
 }

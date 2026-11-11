@@ -25,6 +25,8 @@ data class RecordingInfo(
   val sampleRateHz: Int,
   val durationS: Double,
   val meta: Map<String, String>,
+  /** Pripadajuća WAV snimka zvuka (ako postoji). */
+  val audioFile: File? = null,
 )
 
 data class RecordingData(
@@ -84,7 +86,8 @@ class RecordingRepository(private val context: Context) {
   fun info(f: File): RecordingInfo {
     val key = f.absolutePath
     val stamp = f.lastModified() xor (f.length() shl 20)
-    cache[key]?.let { (s, i) -> if (s == stamp) return i }
+    val wav = File(f.parentFile, f.nameWithoutExtension + ".wav").takeIf { it.isFile }
+    cache[key]?.let { (s, i) -> if (s == stamp) return if (i.audioFile == wav) i else i.copy(audioFile = wav) }
     val meta = LinkedHashMap<String, String>()
     var rows = 0L
     var headerSeen = false
@@ -109,6 +112,7 @@ class RecordingRepository(private val context: Context) {
     val i = RecordingInfo(
       file = f, name = f.nameWithoutExtension, startedAtMs = started, rows = rows, sizeBytes = f.length(),
       sampleRateHz = rate, durationS = if (rows > 1) (lastT - firstT) / 1000.0 else 0.0, meta = meta,
+      audioFile = wav,
     )
     cache[key] = stamp to i
     return i
@@ -165,13 +169,15 @@ class RecordingRepository(private val context: Context) {
   }
 
   suspend fun delete(file: File): Boolean = withContext(Dispatchers.IO) {
-    cache.remove(file.absolutePath); file.delete()
+    cache.remove(file.absolutePath)
+    File(file.parentFile, file.nameWithoutExtension + ".wav").takeIf { it.isFile }?.delete()
+    file.delete()
   }
 
   fun shareIntent(file: File): Intent {
     val uri = FileProvider.getUriForFile(context, "${context.packageName}.files", file)
     return Intent(Intent.ACTION_SEND).apply {
-      type = "text/csv"
+      type = if (file.extension.equals("wav", true)) "audio/wav" else "text/csv"
       putExtra(Intent.EXTRA_STREAM, uri)
       putExtra(Intent.EXTRA_SUBJECT, file.name)
       addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)

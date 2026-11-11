@@ -6,6 +6,10 @@ import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.size
+import androidx.compose.material.icons.outlined.Vibration
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -80,6 +84,21 @@ fun LevelScreen(
   LifecycleResumeEffect(engine) {
     engine.start()
     onPauseOrDispose { }
+  }
+  if (!settings.accelEnabled) {
+    Box(Modifier.fillMaxSize().padding(contentPadding).padding(32.dp), contentAlignment = Alignment.Center) {
+      Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        Icon(Icons.Outlined.Vibration, null, Modifier.size(48.dp), tint = MaterialTheme.colorScheme.outline)
+        Text("Akcelerometar je isključen u postavkama", style = MaterialTheme.typography.titleMedium, textAlign = TextAlign.Center)
+        Text(
+          "Uključi ga u Postavke → Senzori za prikaz libele.",
+          style = MaterialTheme.typography.bodyMedium,
+          color = MaterialTheme.colorScheme.onSurfaceVariant,
+          textAlign = TextAlign.Center,
+        )
+      }
+    }
+    return
   }
   val scope = rememberCoroutineScope()
   val gravity by engine.state.select { it.gravity }
