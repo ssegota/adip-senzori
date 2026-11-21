@@ -5,7 +5,7 @@ Android aplikacija Astronomskog društva "Istra" Pula. Pretvara mobitel u mali m
 - mjeri **akceleraciju u tri osi**, **osvjetljenje (luksmetar)**, **infrazvuk** i **tlak zraka** (ako uređaj ima barometar);
 - sve senzore uzorkuje **fiksnom frekvencijom** koja se bira u postavkama;
 - **snima zapise u CSV** na uređaj i kasnije ih prikazuje u grafovima;
-- **šalje podatke na web servis** na [adip.hr](https://adip.hr): uživo tijekom snimanja ili cijeli zapis naknadno;
+- **šalje podatke na web servis** na [adip.hr](https://adip.hr): u streamu svakih sat vremena paket sa zadnjih sat vremena mjerenja, ili cijeli zapis naknadno (vrijednosti na serveru su zaokružene);
 - ima **libelu** za postavljanje mobitela u vodoravan položaj prije mjerenja;
 - ima **svijetlu i tamnu temu** te **noćni način**: crni ekran na minimalnoj svjetlini, dok mjerenje teče dalje.
 
@@ -101,11 +101,11 @@ flowchart LR
 
   TICK --> HIST[Kružni spremnik<br/>zadnjih 10 s]
   TICK --> CSV[CsvRecorder<br/>zapisi/*.csv]
-  TICK --> Q[Red za slanje]
+  TICK --> Q[StreamWindow<br/>zadnjih 60 min]
 
   HIST --> STATE[(StateFlow&lt;EngineState&gt;<br/>~15 Hz)]
   STATE --> UI[Compose UI]
-  Q --> API[AdipClient] --> WEB[(adip.hr<br/>/api/senzori)]
+  Q -->|svakih sat vremena,<br/>zaokruženo| API[AdipClient] --> WEB[(adip.hr<br/>/api/senzori)]
   CSV --> REPO[RecordingRepository] --> UI
 ```
 
@@ -114,12 +114,14 @@ flowchart LR
 | Komponenta | Datoteka | Uloga |
 |---|---|---|
 | `AdipApp` | `AdipApp.kt` | `Application`, drži jedinstvene instance svih servisa |
-| `SensorEngine` | `sensor/SensorEngine.kt` | Registrira senzore, uzorkuje fiksnom frekvencijom, vodi snimanje i slanje uživo |
+| `SensorEngine` | `sensor/SensorEngine.kt` | Registrira senzore, uzorkuje fiksnom frekvencijom, vodi snimanje i satni raspored streama |
 | `InfrasoundSource` | `sensor/InfrasoundSource.kt` | Čita mikrofon, decimira, filtrira, računa RMS, razinu i spektar |
 | `Dsp` | `sensor/Dsp.kt` | Biquad/Butterworth filtri, decimator, FFT |
 | `MeasurementService` | `service/MeasurementService.kt` | Foreground servis i wake lock, da snimanje radi i kad je ekran ugašen |
 | `CsvRecorder`, `RecordingRepository` | `recording/Recording.kt` | Pisanje, popis, učitavanje, brisanje i dijeljenje CSV zapisa |
 | `AdipClient` | `upload/AdipClient.kt` | HTTP klijent za `/api/senzori` |
+| `StreamWindow` | `upload/StreamWindow.kt` | Kružni spremnik zadnjih 60 min za stream (primitivni nizovi) i zapis paketa u CSV |
+| `Precision` | `upload/Precision.kt` | Zaokruživanje vrijednosti koje idu na server |
 | `SettingsRepository` | `data/Settings.kt` | Postavke (DataStore) |
 | UI | `ui/…` | Ekrani Mjerenje, Libela, Zapisi, Postavke te noćni način |
 
@@ -144,7 +146,7 @@ Android senzori ne isporučuju podatke točno zadanom frekvencijom: događaji ka
    - **svjetlo, tlak i infrazvuk** su zadnja poznata vrijednost (sample-and-hold).
 3. **Vremenska oznaka** svakog uzorka je `t0_wall + n·T` u milisekundama. Redovi u CSV-u su zato točno ekvidistantni, bez jittera. Kad sustav zakasni, ticker sustigne propušteno.
 
-Isti uzorak ide na tri mjesta: u kružni spremnik zadnjih 10 s (grafovi uživo), u CSV kad se snima i u red za slanje kad je uključeno slanje uživo.
+Isti uzorak ide na tri mjesta: u kružni spremnik zadnjih 10 s (grafovi uživo), u CSV kad se snima i u prozor streama (zadnjih 60 min) kad je uključen stream.
 
 ### Jedinice
 
@@ -310,23 +312,26 @@ Radi na produkciji: <https://adip.hr/api/senzori/status>. Detalji su u [`server/
 | GET | `/api/senzori/token` | `Bearer <token>` | Provjera tokena: `{id, naziv, created}` ili 401 |
 | GET | `/api/senzori/tokeni` | `X-Senzori-Lozinka` | Popis tokena |
 | DELETE | `/api/senzori/tokeni/:id` | `X-Senzori-Lozinka` | Opoziv tokena |
-| POST | `/api/senzori/batch` | `Bearer <token>` | Paket redova uživo (JSON, do 2 MB); prvi paket stvara sesiju, sljedeći se dodaju |
+| POST | `/api/senzori/batch` | `Bearer <token>` | Paket redova (JSON, do 2 MB); prvi paket stvara sesiju, sljedeći se dodaju. Aplikacija ga od verzije 1.5 ne koristi |
 | POST | `/api/senzori/upload` | `Bearer <token>` | Cijeli CSV (multipart, polje `file`, do 50 MB); stvara sesiju ili je zamjenjuje |
 | GET | `/api/senzori/sesije` | – | Popis sesija, najnovije prve (bez `deviceId`) |
 | GET | `/api/senzori/sesije/:id?limit=N` | – | Metapodaci i zadnjih N redova kao JSON |
 | GET | `/api/senzori/sesije/:id/csv` | – | Preuzimanje CSV-a |
 | DELETE | `/api/senzori/sesije/:id` | token ili `X-Senzori-Lozinka` | Brisanje sesije |
 
-Primjer paketa koji aplikacija šalje:
+Aplikacija sve šalje na `/upload` (multipart: `sessionId`, `deviceId`, `deviceModel`, `appVersion`, `sampleRateHz`, `file`). Primjer satnog paketa streama:
 
-```json
-{
-  "sessionId": "adip_20261111_210501_3f2a9c1b",
-  "deviceId": "3f2a9c…", "deviceModel": "Google Pixel 7", "appVersion": "1.0",
-  "startedAt": "2026-11-11T20:05:01.123Z", "sampleRateHz": 50,
-  "columns": ["t_ms","ax","ay","az","lux","infra","p_hpa","audio_db"],
-  "rows": [[1794427501143, 0.0123, 0.0871, 9.8012, 312.0, 0.000152, 1013.21, -62.4], …]
-}
+```
+# app=ADIP Senzori 1.5
+# sessionId=stream_3f2a9c1b
+# startedAt=2026-11-21T20:00:00.020Z
+# endedAt=2026-11-21T21:00:00.000Z
+# streamStartedAt=2026-11-21T19:00:00.000Z
+# sampleRateHz=50
+# window=zadnjih 60 min, paket svakih 60 min
+# precision=ax:3;ay:3;az:3;lux:1;infra:6;p_hpa:3;audio_db:3 (decimale)
+t_ms,ax,ay,az,lux,infra,p_hpa,audio_db
+1795291200020,0.012,0.087,9.801,312,0.000152,1013.214,-62.437
 ```
 
 Na serveru se svaka sesija sprema kao `data/senzori/<sessionId>.csv`, istog formata kao na mobitelu, a metapodaci u `data/senzori/index.json`. Deploy ne dira mapu `data/`, pa podaci prežive svaki deploy.
@@ -337,22 +342,24 @@ Na ekranu **Mjerenje**, iznad gumba Start, bira se način. Aplikacija pamti zadn
 
 | Način | CSV na mobitelu | Slanje na adip.hr |
 |---|---|---|
-| **Stream** | ne | da, uživo |
+| **Stream** | ne | da, svakih sat vremena zadnjih sat vremena |
 | **Snimanje** | da | ne (može se poslati naknadno) |
-| **Oboje** | da | da, uživo |
+| **Oboje** | da | da, svakih sat vremena zadnjih sat vremena |
 
 Za Stream i Oboje potreban je token (Postavke → Web servis → **Dohvati token**). Bez tokena je gumb Start onemogućen i aplikacija javlja što nedostaje.
 
 Kako stream radi:
 
-- Uzorci idu u red, a svakih *N* sekundi (postavka "Interval slanja", zadano 2 s) šalje se paket od najviše 5000 redova na `/batch`.
-- Ako slanje ne uspije (nema mreže, server nedostupan), redovi ostaju u redu i šalju se sljedeći put. Red ima najviše 200 000 redova; najstariji se odbacuju.
-- Kad se sesija zaustavi, šalje se ostatak reda, u više paketa ako treba.
-- Na ploči se vidi status, npr. `Poslano 535 · čeka 114 · OK prije 2 s`.
-- Na <https://adip.hr/senzori/> sesija dobiva oznaku **UŽIVO** i grafovi se sami osvježavaju.
+- Uzorci idu u kružni prozor zadnjih 60 minuta (`StreamWindow`). Pri 50 Hz to je oko 7 MB memorije, a pri 200 Hz oko 27 MB.
+- **Svakih sat vremena** od Starta prozor se zapiše u privremeni CSV (zaokruženo, vidi *Preciznost*) i pošalje na `/upload` pod **stalnim ID-om uređaja** `stream_<prvih 8 znakova deviceId>`. Server sesiju istog ID-a zamjenjuje, pa **na serveru uvijek ostaje samo zadnji paket** (zadnji sat) tog uređaja. Prošli paketi se ne gomilaju.
+- Na **Stop** se odmah šalje još jedan paket sa zadnjih sat vremena (ili manje, ako je sesija kraća). Novi stream na istom uređaju zamijeni paket iz prošle sesije.
+- Ako slanje ne uspije (nema mreže, server nedostupan), pokušava se ponovno svakih 5 minuta do sljedećeg termina. Svaki pokušaj šalje najnovijih sat vremena.
+- Na ploči se vidi status, npr. `Sljedeći paket za 42 min · zadnji poslan u 14:05 (180000 redaka)`.
 - I stream i snimanje rade s ugašenim ekranom i u noćnom načinu, uz obavijest u traci.
 
-**Naknadno:** na ekranu *Zapisi* odabire se zapis i "Pošalji na server", što šalje cijeli CSV multipartom na `/upload`. ID sesije je isti kao pri slanju uživo (`<ime_datoteke>_<prvih 8 znakova deviceId>`), pa naknadno slanje zamjenjuje nepotpunu sesiju iz slanja uživo.
+**Preciznost na serveru.** Sve što ide na server zaokružuje se na fiksni broj decimala (`upload/Precision.kt`): `ax`, `ay`, `az` 3, `lux` 1, `infra` 6, `p_hpa` 3, `audio_db` 3. Brojevi se pišu bez eksponenta, a nule na kraju se izostavljaju. **CSV na mobitelu se ne mijenja** i čuva punu preciznost (dijeli se iz aplikacije).
+
+**Naknadno:** na ekranu *Zapisi* odabire se zapis i "Pošalji na server", što šalje cijeli CSV multipartom na `/upload`, zaokružen u hodu (datoteka na mobitelu ostaje ista). ID sesije je `<ime_datoteke>_<prvih 8 znakova deviceId>`, pa ponovno slanje istog zapisa zamjenjuje prethodno.
 
 **Token:** u postavkama gumb **Dohvati token** otvara dijalog za naziv uređaja i lozinku društva. Aplikacija poziva `POST /tokeni` i spremi dobiveni token, a lozinku ne pamti. Token se može kreirati i na web stranici (odjeljak "Tokeni za aplikaciju") i upisati ručno.
 
@@ -364,9 +371,9 @@ Kako stream radi:
 
 ![Web stranica ADIP Senzori](docs/web.png)
 
-- **Sesije:** popis svih sesija, najnovije prve. Sesija koja je primila podatke u zadnjih 30 s dobiva oznaku **UŽIVO**.
+- **Sesije:** popis svih sesija, najnovije prve. Stream je jedna sesija po uređaju (`stream_…`) sa zadnjim satom mjerenja. Sesija koja je primila podatke u zadnjih 30 s dobiva oznaku **UŽIVO** (kod streama kratko nakon svakog paketa).
 - **Grafovi:** za odabranu sesiju akceleracija, osvjetljenje, infrazvuk i tlak, svi na istoj vremenskoj osi.
-- **Uživo:** stranica svakih nekoliko sekundi povlači nove podatke.
+- **Osvježavanje:** stranica svakih nekoliko sekundi povlači nove podatke.
 - **Preuzimanje** CSV-a.
 - **Tokeni za aplikaciju:** uz lozinku se kreiraju, pregledavaju i opozivaju tokeni, a mogu se i brisati sesije.
 - **Pronalaženje:** stranica je povezana s kartice "ADIP Senzori" na stranici Servisi.
@@ -446,7 +453,6 @@ Svijetla, tamna ili po sustavu (postavka). Paleta je tamnoplava "noćno nebo" s 
 | Drži ekran upaljen | uključeno | `FLAG_KEEP_SCREEN_ON` dok je aplikacija otvorena |
 | URL servisa | `https://adip.hr` | Osnovni URL web servisa |
 | Token | prazno | Token uređaja za slanje; gumb **Dohvati token** ga kreira uz lozinku |
-| Interval slanja | 2 s | Koliko se često šalje paket pri streamu |
 | Kalibracija libele | 0°, 0° | Postavlja se gumbom na ekranu Libela |
 
 Postavke se spremaju u DataStore (`postavke.preferences_pb`).
@@ -484,11 +490,13 @@ adip-senzori/
 │           ├── data/Settings.kt             (AppSettings, SettingsRepository)
 │           ├── sensor/
 │           │   ├── EngineState.kt           (Sample, History, InfraInfo, EngineState)
-│           │   ├── SensorEngine.kt          (uzorkovanje, snimanje, slanje uživo)
+│           │   ├── SensorEngine.kt          (uzorkovanje, snimanje, satni stream)
 │           │   ├── InfrasoundSource.kt      (mikrofon → infrazvuk)
 │           │   └── Dsp.kt                   (Biquad, Butterworth, Decimator, FFT)
 │           ├── recording/Recording.kt       (CsvRecorder, RecordingRepository)
 │           ├── upload/AdipClient.kt         (HTTP klijent)
+│           ├── upload/StreamWindow.kt       (prozor zadnjih 60 min za stream)
+│           ├── upload/Precision.kt          (zaokruživanje za server)
 │           ├── service/MeasurementService.kt(foreground servis)
 │           └── ui/                          (Compose ekrani, grafovi, teme, noćni način)
 └── server/                   ← modul za adip-web (Express)

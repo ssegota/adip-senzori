@@ -3,12 +3,11 @@ package hr.adip.senzori.upload
 import android.os.Build
 import hr.adip.senzori.BuildConfig
 import hr.adip.senzori.recording.RecordingInfo
-import hr.adip.senzori.sensor.Sample
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import org.json.JSONArray
 import org.json.JSONObject
 import java.io.DataOutputStream
+import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
 import java.util.UUID
@@ -81,40 +80,24 @@ class AdipClient(val deviceId: String) {
     }
   }
 
-  /** Šalje paket redova uživo (POST /api/senzori/batch). Vraća ukupan broj redova sesije na serveru. */
-  suspend fun sendBatch(
-    baseUrl: String, token: String, sessionId: String, startedAtIso: String, sampleRateHz: Int, rows: List<Sample>,
-  ): Result<Long> = withContext(Dispatchers.IO) {
-    runCatching {
-      val body = JSONObject().apply {
-        put("sessionId", sessionId)
-        put("deviceId", deviceId)
-        put("deviceModel", deviceModel)
-        put("appVersion", BuildConfig.VERSION_NAME)
-        put("startedAt", startedAtIso)
-        put("sampleRateHz", sampleRateHz)
-        put("columns", JSONArray(Sample.COLUMNS))
-        put("rows", JSONArray().apply {
-          rows.forEach { s ->
-            put(JSONArray().apply {
-              s.toCsvRow().forEach { v -> put(if (v == null || (v is Float && (v.isNaN() || v.isInfinite()))) JSONObject.NULL else v) }
-            })
-          }
-        })
-      }.toString().toByteArray()
-      val c = open(baseUrl, "/api/senzori/batch", token, "POST")
-      try {
-        c.doOutput = true
-        c.setRequestProperty("Content-Type", "application/json")
-        c.setFixedLengthStreamingMode(body.size)
-        c.outputStream.use { it.write(body) }
-        c.readResult().optLong("total")
-      } finally { c.disconnect() }
-    }
-  }
+  /**
+   * Šalje CSV zapis s uređaja (POST /api/senzori/upload). Datoteka na uređaju se ne mijenja,
+   * a vrijednosti se pri slanju zaokružuju ([Precision]). Vraća broj spremljenih redova.
+   */
+  suspend fun uploadCsv(baseUrl: String, token: String, info: RecordingInfo): Result<Int> =
+    uploadFile(baseUrl, token, sessionIdFor(info.name), info.file, info.sampleRateHz, roundValues = true)
 
-  /** Šalje cijeli CSV zapis (POST /api/senzori/upload, multipart). Vraća broj spremljenih redova. */
-  suspend fun uploadCsv(baseUrl: String, token: String, info: RecordingInfo): Result<Int> = withContext(Dispatchers.IO) {
+  /**
+   * Šalje satni paket streama (CSV koji je već zaokružen) pod stalnim ID-om [streamSessionId].
+   * Server zamjenjuje prethodni paket ovog uređaja, pa na serveru uvijek ostaje samo zadnji.
+   */
+  suspend fun uploadStream(baseUrl: String, token: String, file: File, sampleRateHz: Int): Result<Int> =
+    uploadFile(baseUrl, token, streamSessionId, file, sampleRateHz, roundValues = false)
+
+  /** POST /api/senzori/upload (multipart). Postojeća sesija istog ID-a na serveru se zamjenjuje. */
+  private suspend fun uploadFile(
+    baseUrl: String, token: String, sessionId: String, file: File, sampleRateHz: Int, roundValues: Boolean,
+  ): Result<Int> = withContext(Dispatchers.IO) {
     runCatching {
       val boundary = "----adip" + UUID.randomUUID().toString().replace("-", "")
       val c = open(baseUrl, "/api/senzori/upload", token, "POST")
@@ -122,17 +105,24 @@ class AdipClient(val deviceId: String) {
         c.doOutput = true
         c.setRequestProperty("Content-Type", "multipart/form-data; boundary=$boundary")
         c.setChunkedStreamingMode(64 * 1024)
-        DataOutputStream(c.outputStream).use { out ->
+        DataOutputStream(c.outputStream.buffered(64 * 1024)).use { out ->
           fun field(name: String, value: String) {
             out.writeBytes("--$boundary\r\nContent-Disposition: form-data; name=\"$name\"\r\n\r\n")
             out.write(value.toByteArray()); out.writeBytes("\r\n")
           }
-          field("sessionId", sessionIdFor(info.name))
+          field("sessionId", sessionId)
           field("deviceId", deviceId)
           field("deviceModel", deviceModel)
-          if (info.sampleRateHz > 0) field("sampleRateHz", info.sampleRateHz.toString())
-          out.writeBytes("--$boundary\r\nContent-Disposition: form-data; name=\"file\"; filename=\"${info.file.name}\"\r\nContent-Type: text/csv\r\n\r\n")
-          info.file.inputStream().use { it.copyTo(out) }
+          field("appVersion", BuildConfig.VERSION_NAME)
+          if (sampleRateHz > 0) field("sampleRateHz", sampleRateHz.toString())
+          out.writeBytes("--$boundary\r\nContent-Disposition: form-data; name=\"file\"; filename=\"$sessionId.csv\"\r\nContent-Type: text/csv\r\n\r\n")
+          if (roundValues) {
+            val w = out.writer(Charsets.UTF_8).buffered(64 * 1024)
+            file.bufferedReader().use { Precision.roundCsv(it, w) }
+            w.flush()
+          } else {
+            file.inputStream().use { it.copyTo(out) }
+          }
           out.writeBytes("\r\n--$boundary--\r\n")
         }
         c.readResult().optInt("rows")
@@ -143,4 +133,7 @@ class AdipClient(val deviceId: String) {
   /** ID sesije na serveru: ime datoteke + kratki ID uređaja (dozvoljeno [A-Za-z0-9_-], max 64). */
   fun sessionIdFor(recordingName: String): String =
     "${recordingName}_${deviceId.take(8)}".replace(Regex("[^A-Za-z0-9_-]"), "_").take(64)
+
+  /** Stalni ID streama ovog uređaja: svaki satni paket zamjenjuje prethodni. */
+  val streamSessionId: String = "stream_${deviceId.take(8)}".replace(Regex("[^A-Za-z0-9_-]"), "_").take(64)
 }

@@ -19,10 +19,14 @@ import hr.adip.senzori.recording.RecordingRepository
 import hr.adip.senzori.recording.isoUtc
 import hr.adip.senzori.service.MeasurementService
 import hr.adip.senzori.upload.AdipClient
+import hr.adip.senzori.upload.Precision
+import hr.adip.senzori.upload.StreamWindow
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -31,6 +35,10 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
+import java.io.File
 import kotlin.math.max
 
 /**
@@ -39,7 +47,10 @@ import kotlin.math.max
  *  - "Ticker" uzorkuje fiksnom frekvencijom (postavke): akceleracija je prosjek svih očitanja
  *    u intervalu (boxcar anti-aliasing), svjetlo/tlak/infrazvuk su zadnja vrijednost.
  *  - Vremenske oznake su t0 + n·T, tj. točno ekvidistantne.
- *  - Isti uzorak ide u povijest (grafovi), CSV (snimanje) i red za slanje (uživo na server).
+ *  - Isti uzorak ide u povijest (grafovi), CSV (snimanje, puna preciznost) i prozor streama.
+ *  - Stream: svakih [STREAM_PERIOD_S] s (sat vremena) šalje se paket sa zadnjih sat vremena
+ *    mjerenja, sa smanjenom preciznošću ([Precision]). Server ga sprema pod stalnim ID-om
+ *    uređaja i time briše prethodni paket. Na Stop se šalje zadnji paket.
  */
 class SensorEngine(
   private val context: Context,
@@ -71,7 +82,7 @@ class SensorEngine(
   private var infra: InfrasoundSource? = null
   private var tickJob: Job? = null
   private var publishJob: Job? = null
-  private var uploadJob: Job? = null
+  private var streamJob: Job? = null
   private var runningRate = 0
 
   // Povijest (~10 s) za prikaz uživo + duža povijest (10 min) za pregled prošlosti
@@ -86,7 +97,9 @@ class SensorEngine(
   @Volatile private var wavTarget: java.io.File? = null
   private var recordingStartMs = 0L
   private var sessionId = ""
-  private val uploadQueue = ArrayList<Sample>()
+  /** Zadnjih sat vremena uzoraka za stream (null kad se ne streama). */
+  @Volatile private var streamWindow: StreamWindow? = null
+  private val sendMutex = Mutex()
   @Volatile private var uploadInfo = UploadInfo()
 
   init {
@@ -211,10 +224,7 @@ class SensorEngine(
       if (active) {
         recorder?.write(s)
         sessionRows++
-        if (mode.streams) synchronized(uploadQueue) {
-          uploadQueue.add(s)
-          if (uploadQueue.size > MAX_QUEUE) uploadQueue.subList(0, uploadQueue.size - MAX_QUEUE).clear()
-        }
+        if (mode.streams) streamWindow?.add(s)
       }
     }
   }
@@ -231,7 +241,7 @@ class SensorEngine(
           infra = infra?.info ?: it.infra,
           audio = infra?.audioInfo ?: AudioInfo(enabled = settings.audioEnabled, status = if (settings.audioEnabled) "Mikrofon nije pokrenut" else ""),
           recordedRows = if (isActive) sessionRows else it.recordedRows,
-          upload = uploadInfo.copy(pendingRows = synchronized(uploadQueue) { uploadQueue.size }),
+          upload = uploadInfo,
         )
       }
     }
@@ -286,7 +296,8 @@ class SensorEngine(
     if (wav != null) meta["audioFile"] = wav.name + " (PCM16 mono, ${s.audioSampleRateHz} Hz zatraženo)"
     wavTarget = wav
     infra?.wavTarget = wav
-    synchronized(uploadQueue) { uploadQueue.clear() }
+    val window = if (sessionMode.streams) StreamWindow(runningRate, STREAM_WINDOW_S) else null
+    streamWindow = window
     uploadInfo = UploadInfo(enabled = sessionMode.streams)
     mode = sessionMode
     sessionRows = 0
@@ -299,7 +310,7 @@ class SensorEngine(
         recordedRows = 0, recordingStartedMs = now, upload = uploadInfo,
       )
     }
-    if (sessionMode.streams) uploadJob = scope.launch { uploadLoop(isoUtc(now)) }
+    if (window != null) streamJob = scope.launch { streamLoop(window, now) }
   }
 
   @Synchronized
@@ -310,40 +321,87 @@ class SensorEngine(
     recorder = null
     wavTarget = null
     infra?.wavTarget = null
-    val job = uploadJob
-    uploadJob = null
-    val streamed = mode.streams
-    // Pošalji ostatak reda (u više paketa ako treba) prije gašenja
-    scope.launch {
-      job?.cancel()
-      if (streamed) {
-        var tries = 0
-        while (synchronized(uploadQueue) { uploadQueue.isNotEmpty() } && tries++ < 50) {
-          if (!flushUpload(isoUtc(recordingStartMs))) break
-        }
-      }
+    val job = streamJob
+    streamJob = null
+    val window = streamWindow
+    streamWindow = null
+    val startedMs = recordingStartMs
+    // Zadnji paket (zadnjih sat vremena) prije gašenja; zamjenjuje prethodni na serveru.
+    if (window != null) scope.launch {
+      job?.cancelAndJoin()
+      uploadInfo = uploadInfo.copy(nextAtMs = 0)
+      var tries = 0
+      while (!sendWindow(window, startedMs) && ++tries < FINAL_TRIES) delay(FINAL_RETRY_MS)
     }
     _state.update { it.copy(recording = false, sessionMode = null, recordedRows = sessionRows) }
   }
 
-  private suspend fun uploadLoop(startedIso: String) {
+  /**
+   * Satni raspored streama: u t0 + n·sat šalje se prozor (zadnjih sat vremena). Ako slanje ne
+   * uspije, pokušava se ponovno svakih [STREAM_RETRY_MS] do sljedećeg termina (svaki pokušaj
+   * šalje najnovijih sat vremena). Vrijeme se mjeri monotonim satom (elapsedRealtime).
+   */
+  private suspend fun streamLoop(window: StreamWindow, startedMs: Long) {
+    val periodMs = STREAM_PERIOD_S * 1000L
+    val wallMinusMono = System.currentTimeMillis() - SystemClock.elapsedRealtime()
+    var next = SystemClock.elapsedRealtime() + periodMs
+    suspend fun waitUntil(mono: Long) {
+      uploadInfo = uploadInfo.copy(nextAtMs = mono + wallMinusMono)
+      val wait = mono - SystemClock.elapsedRealtime()
+      if (wait > 0) delay(wait)
+    }
     while (true) {
-      delay(settings.uploadBatchSeconds.coerceIn(1, 60) * 1000L)
-      flushUpload(startedIso)
+      waitUntil(next)
+      while (!sendWindow(window, startedMs)) {
+        val retry = SystemClock.elapsedRealtime() + STREAM_RETRY_MS
+        if (retry >= next + periodMs) break
+        waitUntil(retry)
+      }
+      next += periodMs
+      val now = SystemClock.elapsedRealtime()
+      while (next <= now) next += periodMs // propušteni termini (npr. dugo ponavljanje) se preskaču
     }
   }
 
-  /** Pošalji jedan paket iz reda. Vraća true ako je uspjelo (ili nije bilo što slati). */
-  private suspend fun flushUpload(startedIso: String): Boolean {
-    val batch = synchronized(uploadQueue) { ArrayList(uploadQueue.take(BATCH_MAX)) }
-    if (batch.isEmpty()) return true
+  /**
+   * Zapisuje prozor u privremeni CSV (zaokruženo) i šalje ga kao paket streama.
+   * Vraća true ako je uspjelo ili nema što slati.
+   */
+  private suspend fun sendWindow(window: StreamWindow, streamStartedMs: Long): Boolean = sendMutex.withLock {
+    if (window.size == 0) return@withLock true
     val s = settings
-    return client.sendBatch(s.serverUrl, s.serverToken, sessionId, startedIso, runningRate, batch)
-      .onSuccess {
-        synchronized(uploadQueue) { uploadQueue.subList(0, minOf(batch.size, uploadQueue.size)).clear() }
-        uploadInfo = uploadInfo.copy(enabled = true, sentRows = it, lastOkAtMs = System.currentTimeMillis(), lastError = null)
+    uploadInfo = uploadInfo.copy(sending = true)
+    val file = File(context.cacheDir, "stream_paket.csv")
+    val result = try {
+      val rows = withContext(Dispatchers.IO) {
+        file.bufferedWriter(bufferSize = 64 * 1024).use { out ->
+          window.writeCsv(out) { firstMs, lastMs ->
+            linkedMapOf(
+              "app" to "ADIP Senzori ${BuildConfig.VERSION_NAME}",
+              "device" to client.deviceModel,
+              "sessionId" to client.streamSessionId,
+              "startedAt" to isoUtc(firstMs),
+              "endedAt" to isoUtc(lastMs),
+              "streamStartedAt" to isoUtc(streamStartedMs),
+              "sampleRateHz" to window.sampleRateHz.toString(),
+              "window" to "zadnjih ${window.windowSeconds / 60} min, paket svakih ${STREAM_PERIOD_S / 60} min",
+              "precision" to Precision.DESCRIPTION,
+              "units" to "t_ms=unix ms; a=m/s^2; lux=lx; infra=" + (if (s.infraCalibrated) "Pa" else "rel. FS") + "; p_hpa=hPa; audio_db=dBFS",
+            )
+          }
+        }
       }
-      .onFailure { uploadInfo = uploadInfo.copy(enabled = true, lastError = it.message) }
+      client.uploadStream(s.serverUrl, s.serverToken, file, window.sampleRateHz).map { rows }
+    } catch (e: CancellationException) {
+      throw e
+    } catch (e: Exception) {
+      Result.failure(e)
+    } finally {
+      file.delete()
+    }
+    result
+      .onSuccess { uploadInfo = uploadInfo.copy(sending = false, sentRows = it.toLong(), lastOkAtMs = System.currentTimeMillis(), lastError = null) }
+      .onFailure { uploadInfo = uploadInfo.copy(sending = false, lastError = it.message ?: it.javaClass.simpleName) }
       .isSuccess
   }
 
@@ -376,8 +434,13 @@ class SensorEngine(
   }
 
   companion object {
-    private const val MAX_QUEUE = 200_000
     const val LONG_HISTORY_S = 600
-    private const val BATCH_MAX = 5_000
+    /** Stream: paket svakih sat vremena… */
+    const val STREAM_PERIOD_S = 3600
+    /** …sa zadnjih sat vremena mjerenja. */
+    const val STREAM_WINDOW_S = 3600
+    private const val STREAM_RETRY_MS = 5 * 60_000L
+    private const val FINAL_TRIES = 3
+    private const val FINAL_RETRY_MS = 10_000L
   }
 }

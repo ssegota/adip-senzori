@@ -40,9 +40,8 @@ data class AppSettings(
   /** Web servis (adip.hr) */
   val serverUrl: String = "https://adip.hr",
   val serverToken: String = "",
-  /** Zadnji odabrani način: stream (slanje uživo), snimanje (CSV) ili oboje. */
+  /** Zadnji odabrani način: stream (paket na server svakih sat vremena), snimanje (CSV) ili oboje. */
   val sessionMode: SessionMode = SessionMode.RECORD,
-  val uploadBatchSeconds: Int = 2,
   /** Kalibracija libele (offset kutova u stupnjevima). */
   val levelOffsetPitch: Float = 0f,
   val levelOffsetRoll: Float = 0f,
@@ -72,7 +71,6 @@ class SettingsRepository(private val context: Context) {
     val url = stringPreferencesKey("server_url")
     val token = stringPreferencesKey("server_token")
     val mode = stringPreferencesKey("session_mode")
-    val batch = intPreferencesKey("upload_batch_s")
     val lvlP = floatPreferencesKey("level_off_pitch")
     val lvlR = floatPreferencesKey("level_off_roll")
   }
@@ -95,7 +93,6 @@ class SettingsRepository(private val context: Context) {
       p[K.url] = s.serverUrl
       p[K.token] = s.serverToken
       p[K.mode] = s.sessionMode.name
-      p[K.batch] = s.uploadBatchSeconds
       p[K.lvlP] = s.levelOffsetPitch
       p[K.lvlR] = s.levelOffsetRoll
     }
@@ -117,7 +114,6 @@ class SettingsRepository(private val context: Context) {
       serverUrl = this[K.url] ?: d.serverUrl,
       serverToken = this[K.token] ?: d.serverToken,
       sessionMode = runCatching { SessionMode.valueOf(this[K.mode] ?: "") }.getOrDefault(d.sessionMode),
-      uploadBatchSeconds = this[K.batch] ?: d.uploadBatchSeconds,
       levelOffsetPitch = this[K.lvlP] ?: d.levelOffsetPitch,
       levelOffsetRoll = this[K.lvlR] ?: d.levelOffsetRoll,
     )

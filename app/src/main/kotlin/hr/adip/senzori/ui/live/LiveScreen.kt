@@ -185,9 +185,9 @@ private fun RecordPanel(engine: SensorEngine, settings: AppSettings) {
           )
           Text(
             if (ui.recording) "${ui.rows} redaka" else when (selected) {
-              SessionMode.STREAM -> "Start šalje mjerenja na ${settings.serverUrl.removePrefix("https://")}"
+              SessionMode.STREAM -> "Start šalje paket svakih sat vremena na ${settings.serverUrl.removePrefix("https://")}"
               SessionMode.RECORD -> "Start zapisuje mjerenja u CSV"
-              SessionMode.BOTH -> "Start šalje mjerenja i zapisuje CSV"
+              SessionMode.BOTH -> "Start zapisuje CSV i šalje paket svakih sat vremena"
             },
             style = NumberStyles.small,
             color = onContainer.copy(alpha = 0.8f),
@@ -260,10 +260,18 @@ private fun UploadLine(u: hr.adip.senzori.sensor.UploadInfo, color: Color) {
     Icon(icon, null, tint = color, modifier = Modifier.size(18.dp))
     Spacer(Modifier.width(6.dp))
     val text = buildString {
-      append("Poslano ${u.sentRows}")
-      if (u.pendingRows > 0) append(" · čeka ${u.pendingRows}")
+      when {
+        u.sending -> append("Šalje se paket (zadnjih sat vremena)…")
+        u.nextAtMs > 0 -> {
+          val min = ((u.nextAtMs - System.currentTimeMillis() + 59_999) / 60_000).coerceAtLeast(0)
+          append("Sljedeći paket za $min min")
+        }
+      }
       if (u.lastError != null) append(" · greška: ${u.lastError}")
-      else if (u.lastOkAtMs > 0) append(" · OK prije ${((System.currentTimeMillis() - u.lastOkAtMs) / 1000).coerceAtLeast(0)} s")
+      else if (u.lastOkAtMs > 0) {
+        val hhmm = java.text.SimpleDateFormat("HH:mm", java.util.Locale.ROOT).format(java.util.Date(u.lastOkAtMs))
+        append(" · zadnji poslan u $hhmm (${u.sentRows} redaka)")
+      }
     }
     Text(text, style = NumberStyles.small, color = color, maxLines = 2)
   }

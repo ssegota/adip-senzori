@@ -46,16 +46,16 @@ class MeasurementService : Service() {
       .setSmallIcon(R.drawable.ic_stat_rec)
       .setContentTitle(
         when (mode) {
-          SessionMode.STREAM -> "ADIP Senzori: stream uživo"
+          SessionMode.STREAM -> "ADIP Senzori: stream"
           SessionMode.RECORD -> "ADIP Senzori snima"
           SessionMode.BOTH -> "ADIP Senzori: stream + snimanje"
         },
       )
       .setContentText(
         when (mode) {
-          SessionMode.STREAM -> "Mjerenja se šalju na web servis"
+          SessionMode.STREAM -> "Svakih sat vremena na web servis ide zadnjih sat vremena mjerenja"
           SessionMode.RECORD -> "Mjerenja se zapisuju u CSV na uređaju"
-          SessionMode.BOTH -> "Mjerenja se šalju na web servis i zapisuju u CSV"
+          SessionMode.BOTH -> "CSV na uređaju; svakih sat vremena paket na web servis"
         },
       )
       .setUsesChronometer(true)

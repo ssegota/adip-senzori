@@ -67,10 +67,15 @@ data class AudioInfo(
   val status: String = "",
 )
 
+/** Stanje streama: paket sa zadnjih sat vremena šalje se jednom na sat. */
 data class UploadInfo(
   val enabled: Boolean = false,
+  /** Redaka u zadnjem uspješno poslanom paketu. */
   val sentRows: Long = 0,
-  val pendingRows: Int = 0,
+  /** Kad je zakazano sljedeće slanje (unix ms); 0 = nije zakazano. */
+  val nextAtMs: Long = 0,
+  /** Paket se upravo zapisuje/šalje. */
+  val sending: Boolean = false,
   val lastOkAtMs: Long = 0,
   val lastError: String? = null,
 )

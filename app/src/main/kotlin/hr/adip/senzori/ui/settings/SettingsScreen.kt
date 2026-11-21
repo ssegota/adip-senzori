@@ -127,12 +127,11 @@ fun SettingsScreen(
       CreateToken(client, settings) { t ->
         scope.launch { repo.update { it.copy(serverToken = t) }; tokenGen++ }
       }
-      Hint("Stream (slanje uživo), snimanje ili oboje biraš na ekranu Mjerenje, pored gumba Start.")
-      NumberField(
-        label = "Interval slanja (s)",
-        value = settings.uploadBatchSeconds.toFloat(),
-        onValue = { v -> update { it.copy(uploadBatchSeconds = v.toInt().coerceIn(1, 3600)) } },
-        decimal = false,
+      Hint("Stream, snimanje ili oboje biraš na ekranu Mjerenje, pored gumba Start.")
+      Hint(
+        "Stream svakih sat vremena šalje zadnjih sat vremena mjerenja (i još jednom na Stop). " +
+          "Na serveru ostaje samo zadnji paket ovog uređaja. Vrijednosti na serveru su zaokružene; " +
+          "CSV na uređaju čuva punu preciznost.",
       )
       ConnectionTest(client, settings)
     }
