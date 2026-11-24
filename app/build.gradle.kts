@@ -10,8 +10,8 @@ android {
     applicationId = "hr.adip.senzori"
     minSdk = 26
     targetSdk = 36
-    versionCode = 6
-    versionName = "1.5"
+    versionCode = 7
+    versionName = "1.6"
   }
 
   buildTypes {
@@ -71,6 +71,8 @@ dependencies {
   // Local tests: jUnit, coroutines, Android runner
   testImplementation(libs.junit)
   testImplementation(libs.kotlinx.coroutines.test)
+  // pravi org.json za JVM testove (Androidov je u unit testovima samo stub)
+  testImplementation(libs.json.org)
 
   // Instrumented tests: jUnit rules and runners
   androidTestImplementation(libs.androidx.test.core)

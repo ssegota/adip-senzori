@@ -353,7 +353,12 @@ Kako stream radi:
 - Uzorci idu u kružni prozor zadnjih 60 minuta (`StreamWindow`). Pri 50 Hz to je oko 7 MB memorije, a pri 200 Hz oko 27 MB.
 - **Svakih sat vremena** od Starta prozor se zapiše u privremeni CSV (zaokruženo, vidi *Preciznost*) i pošalje na `/upload` pod **stalnim ID-om uređaja** `stream_<prvih 8 znakova deviceId>`. Server sesiju istog ID-a zamjenjuje, pa **na serveru uvijek ostaje samo zadnji paket** (zadnji sat) tog uređaja. Prošli paketi se ne gomilaju.
 - Na **Stop** se odmah šalje još jedan paket sa zadnjih sat vremena (ili manje, ako je sesija kraća). Novi stream na istom uređaju zamijeni paket iz prošle sesije.
-- Ako slanje ne uspije (nema mreže, server nedostupan), pokušava se ponovno svakih 5 minuta do sljedećeg termina. Svaki pokušaj šalje najnovijih sat vremena.
+- Prije svakog paketa aplikacija provjerava token (`GET /api/senzori/token`, nekoliko stotina bajtova). Opozvan token ili nedostupan server tako ne troše promet cijelim paketom.
+- **Neispravan ili opozvan token (401/403):** slanje se zaustavlja i ne ponavlja. Nastavlja se tek kad se u Postavkama upiše drugi token, i to odmah.
+- **Ostale greške 4xx** (npr. 413, paket prevelik): slanje se zaustavlja do kraja sesije, jer bi isti zahtjev opet pao.
+- **Mreža ili server** (nema mreže, timeout, 5xx, 408, 429): ponovni pokušaj nakon 5, 10, 20 i 40 minuta, a zatim jednom na sat dok slanje ne uspije. Svaki pokušaj šalje najnovijih sat vremena.
+- U svim slučajevima mjerenje i snimanje na mobitelu rade dalje. Na ploči piše `Slanje zaustavljeno: …` s razlogom.
+- Zašto: svaki pokušaj troši promet hostinga, jer server primi cijeli paket prije nego što odgovori. Verzija 1.4 je s opozvanim tokenom ponavljala odbijeni paket svake 2–3 s i u studenom 2026. potrošila mjesečni limit adip.hr.
 - Na ploči se vidi status, npr. `Sljedeći paket za 42 min · zadnji poslan u 14:05 (180000 redaka)`.
 - I stream i snimanje rade s ugašenim ekranom i u noćnom načinu, uz obavijest u traci.
 

@@ -78,6 +78,8 @@ data class UploadInfo(
   val sending: Boolean = false,
   val lastOkAtMs: Long = 0,
   val lastError: String? = null,
+  /** Zašto je automatsko slanje zaustavljeno (npr. opozvan token); null = slanje radi. */
+  val stopped: String? = null,
 )
 
 data class EngineState(

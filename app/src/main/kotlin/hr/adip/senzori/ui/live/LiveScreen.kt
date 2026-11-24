@@ -252,14 +252,14 @@ private fun RecordPanel(engine: SensorEngine, settings: AppSettings) {
 @Composable
 private fun UploadLine(u: hr.adip.senzori.sensor.UploadInfo, color: Color) {
   val icon = when {
-    u.lastError != null -> Icons.Outlined.CloudOff
+    u.stopped != null || u.lastError != null -> Icons.Outlined.CloudOff
     u.lastOkAtMs > 0 -> Icons.Outlined.CloudDone
     else -> Icons.Outlined.CloudUpload
   }
   Row(verticalAlignment = Alignment.CenterVertically) {
     Icon(icon, null, tint = color, modifier = Modifier.size(18.dp))
     Spacer(Modifier.width(6.dp))
-    val text = buildString {
+    val text = if (u.stopped != null) "Slanje zaustavljeno: ${u.stopped}" else buildString {
       when {
         u.sending -> append("Šalje se paket (zadnjih sat vremena)…")
         u.nextAtMs > 0 -> {

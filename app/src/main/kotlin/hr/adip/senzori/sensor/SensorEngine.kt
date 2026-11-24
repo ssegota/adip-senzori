@@ -20,7 +20,9 @@ import hr.adip.senzori.recording.isoUtc
 import hr.adip.senzori.service.MeasurementService
 import hr.adip.senzori.upload.AdipClient
 import hr.adip.senzori.upload.Precision
+import hr.adip.senzori.upload.StreamSchedule
 import hr.adip.senzori.upload.StreamWindow
+import hr.adip.senzori.upload.UploadPolicy
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -51,6 +53,8 @@ import kotlin.math.max
  *  - Stream: svakih [STREAM_PERIOD_S] s (sat vremena) šalje se paket sa zadnjih sat vremena
  *    mjerenja, sa smanjenom preciznošću ([Precision]). Server ga sprema pod stalnim ID-om
  *    uređaja i time briše prethodni paket. Na Stop se šalje zadnji paket.
+ *    Greške slanja obrađuju se prema [UploadPolicy]: neispravan token zaustavlja slanje,
+ *    a mrežne greške i greške servera ponavljaju se s rastućim odmakom.
  */
 class SensorEngine(
   private val context: Context,
@@ -99,6 +103,8 @@ class SensorEngine(
   private var sessionId = ""
   /** Zadnjih sat vremena uzoraka za stream (null kad se ne streama). */
   @Volatile private var streamWindow: StreamWindow? = null
+  /** Server je trajno odbio paket (4xx osim 401/403/408/429): ništa se više ne šalje do kraja sesije. */
+  @Volatile private var streamHalted = false
   private val sendMutex = Mutex()
   @Volatile private var uploadInfo = UploadInfo()
 
@@ -298,6 +304,7 @@ class SensorEngine(
     infra?.wavTarget = wav
     val window = if (sessionMode.streams) StreamWindow(runningRate, STREAM_WINDOW_S) else null
     streamWindow = window
+    streamHalted = false
     uploadInfo = UploadInfo(enabled = sessionMode.streams)
     mode = sessionMode
     sessionRows = 0
@@ -327,52 +334,78 @@ class SensorEngine(
     streamWindow = null
     val startedMs = recordingStartMs
     // Zadnji paket (zadnjih sat vremena) prije gašenja; zamjenjuje prethodni na serveru.
+    // Ponavlja se samo prolazna greška; neispravan token se otkrije jeftinom provjerom.
     if (window != null) scope.launch {
       job?.cancelAndJoin()
+      if (streamHalted) return@launch
       uploadInfo = uploadInfo.copy(nextAtMs = 0)
       var tries = 0
-      while (!sendWindow(window, startedMs) && ++tries < FINAL_TRIES) delay(FINAL_RETRY_MS)
+      while (sendWindow(window, startedMs, settings.serverToken) == UploadPolicy.Failure.TRANSIENT &&
+        ++tries < FINAL_TRIES
+      ) delay(FINAL_RETRY_MS)
     }
     _state.update { it.copy(recording = false, sessionMode = null, recordedRows = sessionRows) }
   }
 
   /**
-   * Satni raspored streama: u t0 + n·sat šalje se prozor (zadnjih sat vremena). Ako slanje ne
-   * uspije, pokušava se ponovno svakih [STREAM_RETRY_MS] do sljedećeg termina (svaki pokušaj
-   * šalje najnovijih sat vremena). Vrijeme se mjeri monotonim satom (elapsedRealtime).
+   * Satni raspored streama: u t0 + n·sat šalje se prozor (zadnjih sat vremena). Ishod svakog
+   * pokušaja vodi [StreamSchedule] prema [UploadPolicy]:
+   *  - prolazna greška (mreža, 5xx…): ponovni pokušaj nakon 5, 10, 20, 40, pa svakih 60 min;
+   *  - neispravan ili opozvan token (401/403): slanje staje dok se u postavkama ne upiše drugi
+   *    token (provjera je lokalna, bez mreže), a onda se odmah pokušava ponovno;
+   *  - ostale 4xx: slanje staje do kraja sesije.
+   * Mjerenje i snimanje na mobitelu se u svim slučajevima nastavljaju.
+   * Vrijeme se mjeri monotonim satom (elapsedRealtime).
    */
   private suspend fun streamLoop(window: StreamWindow, startedMs: Long) {
-    val periodMs = STREAM_PERIOD_S * 1000L
     val wallMinusMono = System.currentTimeMillis() - SystemClock.elapsedRealtime()
-    var next = SystemClock.elapsedRealtime() + periodMs
-    suspend fun waitUntil(mono: Long) {
-      uploadInfo = uploadInfo.copy(nextAtMs = mono + wallMinusMono)
-      val wait = mono - SystemClock.elapsedRealtime()
-      if (wait > 0) delay(wait)
-    }
+    val plan = StreamSchedule(STREAM_PERIOD_S * 1000L, SystemClock.elapsedRealtime())
     while (true) {
-      waitUntil(next)
-      while (!sendWindow(window, startedMs)) {
-        val retry = SystemClock.elapsedRealtime() + STREAM_RETRY_MS
-        if (retry >= next + periodMs) break
-        waitUntil(retry)
+      uploadInfo = uploadInfo.copy(nextAtMs = plan.nextAtMs + wallMinusMono)
+      val wait = plan.nextAtMs - SystemClock.elapsedRealtime()
+      if (wait > 0) delay(wait)
+      val token = settings.serverToken
+      val failure = sendWindow(window, startedMs, token)
+      if (plan.onResult(failure, SystemClock.elapsedRealtime())) continue
+
+      if (failure == UploadPolicy.Failure.PERMANENT) {
+        streamHalted = true
+        uploadInfo = uploadInfo.copy(
+          nextAtMs = 0,
+          stopped = "server odbija paket (${uploadInfo.lastError ?: "4xx"}). Slanje se nastavlja tek u novoj sesiji.",
+        )
+        return
       }
-      next += periodMs
-      val now = SystemClock.elapsedRealtime()
-      while (next <= now) next += periodMs // propušteni termini (npr. dugo ponavljanje) se preskaču
+      uploadInfo = uploadInfo.copy(
+        nextAtMs = 0,
+        stopped = if (token.isBlank()) "token nije postavljen. Upiši token u Postavkama."
+        else "token je neispravan ili opozvan. Upiši novi token u Postavkama.",
+      )
+      while (settings.serverToken == token) delay(TOKEN_POLL_MS)
+      uploadInfo = uploadInfo.copy(stopped = null, lastError = null)
+      plan.resume(SystemClock.elapsedRealtime())
     }
   }
 
   /**
-   * Zapisuje prozor u privremeni CSV (zaokruženo) i šalje ga kao paket streama.
-   * Vraća true ako je uspjelo ili nema što slati.
+   * Šalje prozor kao paket streama (privremeni CSV, zaokruženo) s tokenom [token].
+   * Prije paketa ide jeftina provjera tokena ([AdipClient.checkToken]), pa opozvan token ili
+   * nedostupan server ne troše promet cijelim paketom.
+   * Vraća null ako je uspjelo (ili nema što slati), inače vrstu greške.
    */
-  private suspend fun sendWindow(window: StreamWindow, streamStartedMs: Long): Boolean = sendMutex.withLock {
-    if (window.size == 0) return@withLock true
+  private suspend fun sendWindow(
+    window: StreamWindow, streamStartedMs: Long, token: String,
+  ): UploadPolicy.Failure? = sendMutex.withLock {
+    if (window.size == 0) return@withLock null
     val s = settings
+    if (token.isBlank()) {
+      uploadInfo = uploadInfo.copy(sending = false, lastError = "token nije postavljen")
+      return@withLock UploadPolicy.Failure.AUTH
+    }
     uploadInfo = uploadInfo.copy(sending = true)
     val file = File(context.cacheDir, "stream_paket.csv")
     val result = try {
+      client.checkToken(s.serverUrl, token).getOrThrow()
       val rows = withContext(Dispatchers.IO) {
         file.bufferedWriter(bufferSize = 64 * 1024).use { out ->
           window.writeCsv(out) { firstMs, lastMs ->
@@ -391,7 +424,7 @@ class SensorEngine(
           }
         }
       }
-      client.uploadStream(s.serverUrl, s.serverToken, file, window.sampleRateHz).map { rows }
+      client.uploadStream(s.serverUrl, token, file, window.sampleRateHz).map { rows }
     } catch (e: CancellationException) {
       throw e
     } catch (e: Exception) {
@@ -399,10 +432,16 @@ class SensorEngine(
     } finally {
       file.delete()
     }
-    result
-      .onSuccess { uploadInfo = uploadInfo.copy(sending = false, sentRows = it.toLong(), lastOkAtMs = System.currentTimeMillis(), lastError = null) }
-      .onFailure { uploadInfo = uploadInfo.copy(sending = false, lastError = it.message ?: it.javaClass.simpleName) }
-      .isSuccess
+    result.fold(
+      onSuccess = {
+        uploadInfo = uploadInfo.copy(sending = false, sentRows = it.toLong(), lastOkAtMs = System.currentTimeMillis(), lastError = null)
+        null
+      },
+      onFailure = {
+        uploadInfo = uploadInfo.copy(sending = false, lastError = it.message ?: it.javaClass.simpleName)
+        UploadPolicy.classify(it)
+      },
+    )
   }
 
   /** Kružni spremnik uzoraka za grafove uživo. */
@@ -439,7 +478,8 @@ class SensorEngine(
     const val STREAM_PERIOD_S = 3600
     /** …sa zadnjih sat vremena mjerenja. */
     const val STREAM_WINDOW_S = 3600
-    private const val STREAM_RETRY_MS = 5 * 60_000L
+    /** Koliko često se (lokalno) provjerava je li upisan novi token nakon 401/403. */
+    private const val TOKEN_POLL_MS = 2_000L
     private const val FINAL_TRIES = 3
     private const val FINAL_RETRY_MS = 10_000L
   }

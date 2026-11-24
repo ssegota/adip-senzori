@@ -8,6 +8,7 @@ import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import java.io.DataOutputStream
 import java.io.File
+import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.URL
 import java.util.UUID
@@ -31,15 +32,32 @@ class AdipClient(val deviceId: String) {
     }
   }
 
+  /** Čita JSON odgovor; status izvan 2xx baca [HttpStatusException], neispravan odgovor [IOException]. */
   private fun HttpURLConnection.readResult(): JSONObject {
     val code = responseCode
     val body = (if (code in 200..299) inputStream else errorStream)?.bufferedReader()?.use { it.readText() }.orEmpty()
     val json = runCatching { JSONObject(body) }.getOrNull()
     if (code !in 200..299 || json == null || !json.optBoolean("ok", false)) {
       val msg = json?.optString("error")?.takeIf { it.isNotBlank() } ?: body.take(120).ifBlank { "prazan odgovor" }
-      throw RuntimeException("HTTP $code: $msg")
+      if (code !in 200..299) throw HttpStatusException(code, "HTTP $code: $msg")
+      throw IOException("HTTP $code: $msg")
     }
     return json
+  }
+
+  /**
+   * Jeftina provjera tokena i dostupnosti servera (GET /api/senzori/token, nekoliko stotina
+   * bajtova). Stream je zove prije svakog paketa, pa opozvan token ili srušen server ne troše
+   * promet cijelim paketom. Vraća naziv tokena.
+   */
+  suspend fun checkToken(baseUrl: String, token: String): Result<String> = withContext(Dispatchers.IO) {
+    runCatching {
+      val c = open(baseUrl, "/api/senzori/token", token, "GET")
+      try {
+        val t = c.readResult()
+        t.optString("naziv").ifBlank { t.optString("id") }
+      } finally { c.disconnect() }
+    }
   }
 
   suspend fun status(baseUrl: String, token: String): Result<String> = withContext(Dispatchers.IO) {
